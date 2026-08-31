@@ -433,3 +433,26 @@ describe('VncSession stall handling', () => {
     assert.equal(session.connectTimer, null, 'a stale timer would fail a later attempt')
   })
 })
+
+describe('a stalled attempt carries its remedy to the UI', () => {
+  const machine = { host: 'h.example.com', port: 6080, secure: false }
+
+  it('describeTimeout attaches the fix', () => {
+    assert.deepEqual(describeTimeout(machine, 0).fix.patch, { secure: true, port: 443 })
+  })
+
+  it('errorStatus passes the fix through so the overlay can offer it', () => {
+    // Without this the diagnosis names the problem but leaves the user to find
+    // the editor and translate it into two field changes themselves.
+    assert.deepEqual(errorStatus(describeTimeout(machine, 0)).fix.patch, { secure: true, port: 443 })
+  })
+
+  it('offers no fix when the endpoint accepted but never handshook', () => {
+    // Port and scheme are evidently fine there; the path is the suspect.
+    assert.equal(errorStatus(describeTimeout(machine, 1)).fix, null)
+  })
+
+  it('offers no fix for an ordinary close', () => {
+    assert.equal(errorStatus(describeClose({ code: 1015 })).fix, null)
+  })
+})

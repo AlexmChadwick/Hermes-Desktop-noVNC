@@ -413,6 +413,22 @@ export const CONNECT_TIMEOUT_MS = 12_000
  * `0` is CONNECTING: nothing answered at all. Anything further means the
  * endpoint accepted a socket but never finished the VNC handshake.
  */
+export function suggestFix(machine) {
+  // The single most common misconfiguration: an endpoint that is really an
+  // https site with websockify behind it, entered as plain ws:// on
+  // websockify's conventional 6080. Both facts are wrong together, and the
+  // user should not have to know that to fix it.
+  if (!machine.secure) {
+    return { label: 'Use TLS on port 443', patch: { secure: true, port: 443 } }
+  }
+
+  if (machine.port !== 443) {
+    return { label: 'Try port 443', patch: { port: 443 } }
+  }
+
+  return null
+}
+
 export function describeTimeout(machine, socketState) {
   const seconds = Math.round(CONNECT_TIMEOUT_MS / 1000)
 
@@ -427,7 +443,8 @@ export function describeTimeout(machine, socketState) {
         `Nothing answered at ${machine.host}:${machine.port} within ${seconds} seconds. A closed port refuses ` +
         `immediately, so silence points at a firewall, a tunnel that is down, or the wrong port.${tlsHint}`,
       retryable: true,
-      code: null
+      code: null,
+      fix: suggestFix(machine)
     }
   }
 
@@ -453,7 +470,8 @@ export function errorStatus(described) {
     phase: 'error',
     message: described.title,
     detail: described.detail,
-    code: described.code ?? null
+    code: described.code ?? null,
+    fix: described.fix ?? null
   }
 }
 
@@ -1020,6 +1038,8 @@ export class VncSession {
       phase: 'reconnecting',
       message: described.title,
       detail: described.detail,
+      code: described.code ?? null,
+      fix: described.fix ?? null,
       attempt: this.attempt,
       nextRetryAt: Date.now() + delay
     })
@@ -1168,7 +1188,12 @@ function StatusPill() {
 
   return h(
     'span',
-    { className: cn('inline-flex items-center gap-1.5 text-[0.7rem]', PHASE_TONE[phase]) },
+    {
+      // Shrinkable and truncating: a long diagnosis used to wrap the toolbar
+      // onto a second row, pushing fullscreen and disconnect out of reach.
+      className: cn('inline-flex min-w-0 max-w-[15rem] items-center gap-1.5 text-[0.7rem]', PHASE_TONE[phase]),
+      title: status.message || PHASE_LABEL[phase]
+    },
     phase === 'connecting' || phase === 'reconnecting'
       ? h(GlyphSpinner, { spinner: 'breathe', className: 'text-[0.7rem]' })
       : h('span', {
@@ -1177,7 +1202,7 @@ function StatusPill() {
             phase === 'connected' ? 'bg-emerald-500' : phase === 'error' ? 'bg-red-500' : 'bg-current opacity-50'
           )
         }),
-    status.message || PHASE_LABEL[phase]
+    h('span', { className: 'truncate' }, status.message || PHASE_LABEL[phase])
   )
 }
 
@@ -1234,7 +1259,7 @@ function MachinesPane() {
   )
 }
 
-function MachineRow({ machine, selected, phase }) {
+export function MachineRow({ machine, selected, phase }) {
   const row = h(
     'div',
     {
@@ -1501,7 +1526,7 @@ function ViewerToolbar({ machine, status, passthrough, setPassthrough, fullscree
   return h(
     'div',
     { className: 'flex shrink-0 flex-wrap items-center gap-2 border-b border-(--ui-stroke-secondary) px-2 py-1' },
-    h('span', { className: 'truncate text-xs font-medium' }, status.desktopName || machine.name),
+    h('span', { className: 'max-w-[10rem] shrink-0 truncate text-xs font-medium' }, status.desktopName || machine.name),
     h(StatusPill),
     h('div', { className: 'flex-1' }),
 
@@ -1653,6 +1678,19 @@ function ViewerOverlay({ status }) {
             { type: 'button', variant: 'ghost', size: 'sm', className: 'h-6 px-2 text-[0.7rem]', onClick: () => disconnectCurrent() },
             'Cancel'
           )
+        )
+      : null,
+    // A diagnosis the user has to act on elsewhere is only half an answer.
+    status.fix
+      ? h(
+          Button,
+          {
+            type: 'button',
+            size: 'sm',
+            className: 'h-6 px-2 text-[0.7rem]',
+            onClick: () => applyFix(status.fix)
+          },
+          status.fix.label
         )
       : null,
     status.phase === 'error'
@@ -1944,6 +1982,18 @@ function upsertMachine(machine) {
 
 function updateMachine(machine) {
   upsertMachine(machine)
+}
+
+/** Apply a suggested endpoint correction to the selected machine. Changing a
+ *  transport field re-creates the session, so this reconnects on its own. */
+function applyFix(fix) {
+  const machine = $machines.get().find(m => m.id === $selectedId.get())
+
+  if (!machine || !fix?.patch) {
+    return
+  }
+
+  updateMachine({ ...machine, ...fix.patch })
 }
 
 /** Copy a machine so a near-identical endpoint is one edit away. */
