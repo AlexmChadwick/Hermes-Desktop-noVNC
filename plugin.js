@@ -263,7 +263,8 @@ export function buildWsUrl(machine) {
 }
 
 /** The http(s) twin of the websocket URL, for the reachability probe. Carries
- *  no credentials — it exists only to tell "host unreachable" from "host up". */
+ *  no credentials — it exists only to separate a dead host and port from a
+ *  live one that simply refused the upgrade. */
 export function buildProbeUrl(machine) {
   const scheme = machine.secure ? 'https' : 'http'
   const port = Number(machine.port)
@@ -317,9 +318,9 @@ export function backoffDelay(attempt, { random = Math.random, ...opts } = {}) {
  * An honest limitation, stated here and in the README: when a WebSocket
  * *handshake* fails, browsers deliberately do not expose the HTTP status to
  * JavaScript. Every such failure arrives as code 1006 with an empty reason. So
- * we report the real code and reason we were given, and use `reachable` (from
- * a no-cors probe, which can distinguish "host answered" from "host did not")
- * to narrow 1006 down instead of inventing a status we cannot see.
+ * we report the real code and reason we were given, and use `reachable` — a
+ * no-cors probe that can tell an answering host apart from a silent one — to
+ * narrow 1006 down instead of inventing a status we cannot see.
  */
 export function describeClose({ code, reason, everConnected = false, reachable = null, httpAuth = false } = {}) {
   const trimmed = String(reason ?? '').trim()
@@ -413,9 +414,12 @@ export function describeSecurityFailure({ status, reason } = {}) {
 // ---------------------------------------------------------------------------
 
 /** Matches the specifier of a static/dynamic import. Same shape the app's own
- *  runtime-loader uses. It can also match `from 'x'` inside a comment, which is
- *  harmless here: we only substitute specifiers that resolved to a real
- *  vendored file, and a comment's text is not one. */
+ *  runtime-loader uses. Note it is not comment-aware: prose that looks like an
+ *  import statement matches too. That is harmless for THIS rewriter, which only
+ *  substitutes specifiers that resolved to a real vendored file — but it is NOT
+ *  harmless for the host loader, which rejects the whole plugin over such a
+ *  match. Hence the rule enforced by test/loader-contract.test.mjs: never write
+ *  the word "from" directly before a quoted string anywhere in this file. */
 const IMPORT_SPECIFIER = () => /(from\s*|import\s*\(\s*|import\s+)(['"])([^'"]+)\2/g
 
 /** Resolve `spec` (e.g. '../vendor/pako/x.js') against the directory of
@@ -914,9 +918,9 @@ class VncSession {
  * Coarse reachability probe used only to narrow down close code 1006.
  *
  * A no-cors fetch cannot read the status (that is the whole point of an opaque
- * response), but resolving vs rejecting still distinguishes "something answered
- * at this host and port" from "nothing did", which is the difference between
- * "your auth/path is wrong" and "your tunnel is down". Never sends credentials.
+ * response), but resolving vs rejecting still separates "something answered at
+ * this host and port" from the silent case — the difference between "your auth
+ * or path is wrong" and "your tunnel is down". Never sends credentials.
  */
 async function probeReachable(machine) {
   try {
