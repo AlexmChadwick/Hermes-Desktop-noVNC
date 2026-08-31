@@ -11,6 +11,8 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
+import { readFileSync } from 'node:fs'
+
 import { MachineRow, normalizeMachine, suggestFix } from '../plugin.js'
 
 /** Walk the element tree the stubbed createElement produces. */
@@ -105,5 +107,34 @@ describe('suggestFix', () => {
 
   it('has nothing to suggest once the endpoint is already wss on 443', () => {
     assert.equal(suggestFix(base({ secure: true, port: 443 })), null)
+  })
+})
+
+describe('roster layout', () => {
+  const source = readFileSync(new URL('../plugin.js', import.meta.url), 'utf8')
+
+  it('does not put the machine list inside a Radix ScrollArea', () => {
+    // Radix renders its viewport content as a table with min-width:100%, which
+    // sizes to content instead of to the pane. A long endpoint then widened the
+    // row past the pane edge and pushed the edit button out of sight — twice.
+    // Checks real usage, not the comment that explains why it is avoided.
+    assert.ok(!/h\(\s*ScrollArea/.test(source), 'the roster must not render a ScrollArea')
+    assert.ok(!/^\s*ScrollArea,$/m.test(source), 'ScrollArea must not be imported')
+  })
+
+  it('constrains the list so a long endpoint cannot widen the pane', () => {
+    assert.match(source, /overflow-x-hidden overflow-y-auto/)
+    assert.match(source, /flex w-full min-w-0 flex-col/)
+  })
+
+  it('offers editing through the command palette too', () => {
+    // Redundancy on purpose: a palette command cannot be hidden by layout.
+    assert.match(source, /Remote Desktop: Edit current machine…/)
+  })
+
+  it('offers editing from the viewer toolbar as well as the roster', () => {
+    const gears = source.match(/name: 'settings-gear'/g) ?? []
+
+    assert.ok(gears.length >= 2, 'expected an edit control on both the row and the toolbar')
   })
 })

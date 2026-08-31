@@ -79,7 +79,11 @@
         )
 
         const palette = registered.filter(c => c.area === 'palette')
-        check(palette.length === 2, `registered ${palette.length} command-palette entries`)
+        check(palette.length >= 3, `registered ${palette.length} command-palette entries`)
+        check(
+          palette.some(c => /edit/i.test(c.data?.label ?? '')),
+          'one palette entry edits a machine, so editing survives any layout problem'
+        )
 
         check(disposers.length > 0, 'registered an onDispose cleanup, so a hot reload cannot orphan a socket')
 

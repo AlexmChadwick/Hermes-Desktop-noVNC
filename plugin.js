@@ -74,7 +74,6 @@ import {
   Input,
   PALETTE_AREA,
   PANES_AREA,
-  ScrollArea,
   Switch,
   Tip,
   useValue
@@ -1274,11 +1273,17 @@ function MachinesPane() {
           description: 'Add a machine with its websockify host, port and path to start watching it.'
         })
       : h(
-          ScrollArea,
-          { className: 'min-h-0 flex-1' },
+          // A plain scroller, deliberately not ScrollArea: Radix renders its
+          // viewport content as a table with min-width:100%, which sizes to
+          // content rather than to the pane. That let a long endpoint widen the
+          // row past the pane and push the edit button off-screen, so the only
+          // way to edit a machine silently disappeared. The app's own sidebar
+          // lists use a plain overflow container for the same reason.
+          'div',
+          { className: 'min-h-0 w-full flex-1 overflow-x-hidden overflow-y-auto' },
           h(
             'div',
-            { className: 'flex flex-col gap-px px-1 pb-2' },
+            { className: 'flex w-full min-w-0 flex-col gap-px px-1 pb-2' },
             ...machines.map(machine =>
               h(MachineRow, {
                 key: machine.id,
@@ -1642,6 +1647,22 @@ function ViewerToolbar({ machine, status, passthrough, setPassthrough, fullscree
           onClick: () => $fullscreen.set(!fullscreen)
         },
         h(Codicon, { name: fullscreen ? 'screen-normal' : 'screen-full', className: 'text-[0.75rem]' })
+      )
+    ),
+
+    h(
+      Tip,
+      { label: 'Edit this machine' },
+      h(
+        Button,
+        {
+          type: 'button',
+          variant: 'ghost',
+          size: 'sm',
+          className: 'h-6 px-1.5',
+          onClick: () => $editing.set(machine)
+        },
+        h(Codicon, { name: 'settings-gear', className: 'text-[0.75rem]' })
       )
     ),
 
@@ -2134,6 +2155,25 @@ export default {
         label: 'Remote Desktop: Add machine…',
         keywords: ['vnc', 'novnc', 'remote', 'desktop', 'kvm', 'screen'],
         run: () => $editing.set(normalizeMachine({}).machine)
+      }
+    })
+
+    ctx.register({
+      id: 'edit-machine',
+      area: PALETTE_AREA,
+      data: {
+        id: `${ID}.edit-machine`,
+        label: 'Remote Desktop: Edit current machine…',
+        keywords: ['vnc', 'novnc', 'remote', 'desktop', 'edit', 'machine', 'port', 'host'],
+        run: () => {
+          const machine = $machines.get().find(m => m.id === $selectedId.get()) ?? $machines.get()[0]
+
+          if (machine) {
+            $editing.set(machine)
+          } else {
+            host.notify({ kind: 'info', message: 'No machines to edit yet.' })
+          }
+        }
       }
     })
 
