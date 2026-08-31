@@ -91,6 +91,21 @@ describe('host loader acceptance', () => {
     assert.deepEqual(unsupportedImports(source), [])
   })
 
+  it('mentions each resolvable specifier exactly once, in its real import', () => {
+    // The loader does not just *scan* these matches, it REWRITES them to blob
+    // URLs — anywhere in the text, comments and string literals included. A
+    // second mention of 'react' sitting inside a user-facing string would be
+    // silently replaced with a blob: URL at load time. One occurrence each
+    // means the only things rewritten are the two genuine import statements.
+    const counts = {}
+
+    for (const match of source.matchAll(importSpecifierRe())) {
+      counts[match[3]] = (counts[match[3]] ?? 0) + 1
+    }
+
+    assert.deepEqual(counts, { '@hermes/plugin-sdk': 1, react: 1 })
+  })
+
   it('would still be rejected if the guarded prose came back', () => {
     // Proves the check has teeth rather than passing vacuously.
     const regressed = `${source}\n// distinguishes "a" from "b"\n`

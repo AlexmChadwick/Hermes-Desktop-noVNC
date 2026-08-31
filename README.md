@@ -111,6 +111,40 @@ So `loadRfbClass()` walks noVNC's module graph from disk, rewrites each module's
 
 noVNC is licensed MPL-2.0 with BSD-licensed components; `vendor/novnc/LICENSE.txt` and `vendor/novnc/AUTHORS` ship alongside it as those licences require.
 
+## A loader gotcha worth knowing
+
+If you write a Hermes desktop plugin, this one will cost you an afternoon.
+
+Before evaluating `plugin.js` the loader scans it as **text** for import
+specifiers, and rejects the whole plugin if it finds one it cannot resolve. The
+regex is neither comment-aware nor string-aware:
+
+```js
+/(from\s*|import\s*\(\s*|import\s+)(['"])([^'"]+)\2/g
+```
+
+So an ordinary English sentence in a comment — the word *from* followed by a
+quoted phrase — is read as an import. This plugin was rejected on first install
+with:
+
+```
+unsupported imports: host up, host did not, x, nothing did
+  — runtime plugins may only import @hermes/plugin-sdk and react
+```
+
+All four were prose. One of them was the comment explaining this very hazard.
+The file parsed, imported and ran correctly; it simply never got that far.
+
+The same regex also drives the **rewrite** step, which substitutes matched
+specifiers with blob URLs anywhere in the text. A stray `from 'react'` inside a
+user-facing string would be silently replaced with a `blob:` URL at load time.
+
+`test/loader-contract.test.mjs` replicates the loader's check verbatim, asserts
+each resolvable specifier appears exactly once, and asserts the check still
+fails when the offending prose is reintroduced, so it cannot pass vacuously.
+The rule for this file: **never write the word "from" directly before a quoted
+string.**
+
 ## Tests
 
 ```bash
@@ -151,13 +185,16 @@ Observed in Chromium:
 | Bad VNC credentials | `securityfailure` fired with `status=1` and the server's reason string, distinct from the transport close |
 | Refused upgrade (HTTP 404) | Surfaced as **1006 with an empty reason** — confirming that the handshake's HTTP status is genuinely invisible, exactly as documented above |
 | Plugin load | `plugin.js` evaluated in a browser and registered 2 panes (`left`, `main`), 2 palette entries, and an `onDispose` cleanup; both `render()` calls returned elements |
+| Host loader acceptance | The loader's own text scan run verbatim over `plugin.js` — see [the gotcha](#a-loader-gotcha-worth-knowing), which is how the first install failed |
 | Reachability probe | A live host resolves opaque (`type=opaque status=0`); a dead port throws `TypeError: Failed to fetch` — so the two really are distinguishable |
 
-Two bugs were caught this way rather than by reading the code. Pasting a bare
+Three bugs were caught by testing rather than by reading the code — the third
+only by the real app, which is why its check is now replicated in the suite. Pasting a bare
 `host:port` silently wiped the default websockify path. And the reachability
 probe used `redirect: 'manual'`, which makes Chromium reject the promise even
 when the host answered — every failure would have been reported as "cannot
-reach the host". Both are fixed and covered.
+reach the host". The third was the loader rejecting prose in comments as
+imports. All three are fixed and covered by tests.
 
 One further finding worth recording: a server that floods uncompressed Raw updates can
 bury its own close frame, and the close then degrades to `1006`. That was the
