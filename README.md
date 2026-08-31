@@ -55,9 +55,20 @@ Add a machine and give it the **websockify** endpoint, not the noVNC web page. I
 
 These are real constraints of the platform, found while building this. I would rather write them down than have you discover them at the wrong moment.
 
-### Credentials are never stored
+### How credentials are stored
 
-The plugin SDK exposes **no secure storage**. `ctx.storage` is plain JSON in `localStorage`, and `ctx.os` offers clipboard/open/reveal but no keychain and no `safeStorage`. Since there is nowhere safe to put a password, this plugin **does not offer to remember one**. A VNC password is typed at connect time, held in a variable for the life of the connection, and dropped on disconnect.
+By default nothing is stored: a VNC password or an HTTP sign-in is typed at connect time, held for the life of the connection, and dropped on disconnect.
+
+For an endpoint behind HTTP auth you can tick **Remember this sign-in**. What happens then, precisely:
+
+- A 256-bit AES-GCM key is generated with `extractable: false` and kept in IndexedDB. The raw key bytes never exist in JavaScript — not for this plugin, not for any other.
+- Your credentials are sealed with it and the **ciphertext** goes into plugin storage. Reading that storage, a settings backup, or a synced JSON file yields ciphertext.
+- A sign-in that gets refused is deleted rather than retried, so a stale password does not lock you into a retry loop.
+- Removing a machine deletes its sealed credentials.
+
+What this does **not** protect against, said plainly: someone who already has your OS account and this app's profile directory can ask the app to decrypt. No renderer-side scheme can beat that. The app's own `safeStorage`/OS-keychain path is used for gateway tokens but is not exposed to plugins — I checked the preload bridge, which offers only the encryption *policy* toggle. If that ever changes, it is the better backend and this should move to it.
+
+A **VNC** password is still never stored: it is a short DES-based secret shared with whoever else can reach the display, and the tunnel is the real access control.
 
 ### HTTP Basic auth in front of websockify
 

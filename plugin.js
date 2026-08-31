@@ -183,7 +183,10 @@ export function normalizeMachine(raw, { id } = {}) {
       scale: input.scale === 'actual' ? 'actual' : 'fit',
       // Purely a diagnostic hint: when set, a failed handshake explains the
       // browser's HTTP-auth limitation instead of listing generic causes.
-      httpAuth: Boolean(input.httpAuth)
+      httpAuth: Boolean(input.httpAuth),
+      // Whether to keep this endpoint's sign-in. Only the flag lives here; the
+      // credentials themselves are sealed under a non-extractable key.
+      rememberAuth: Boolean(input.rememberAuth)
     }
   }
 }
@@ -568,6 +571,146 @@ export async function readModuleSource(desktop, absolutePath, relPath) {
   return text
 }
 
+// ---------------------------------------------------------------------------
+// Secret storage
+//
+// The plugin SDK has no secret API, and Electron's safeStorage is used by the
+// app for its own gateway tokens but is not exposed to plugins (checked: the
+// preload bridge offers only the encryption *policy* toggle). The strongest
+// mechanism actually available to a renderer is a non-extractable WebCrypto key
+// held in IndexedDB: the raw key bytes never exist in JavaScript, so the stored
+// blob is ciphertext to anything that reads plugin storage.
+//
+// What that does and does not buy, stated plainly because it matters:
+//   - Reading this plugin's storage, a settings backup, or a synced JSON file
+//     yields ciphertext, not your password.
+//   - It does NOT defeat someone who already has your OS account and this app's
+//     profile directory — they can ask the app to decrypt. No renderer-side
+//     scheme can beat that, and claiming otherwise would be dishonest.
+// ---------------------------------------------------------------------------
+
+const SECRET_DB = 'hermes-novnc-keys'
+const SECRET_STORE = 'keys'
+const SECRET_KEY_ID = 'basic-auth-v1'
+
+const toBase64 = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes)))
+const fromBase64 = text => Uint8Array.from(atob(text), char => char.charCodeAt(0))
+
+/**
+ * Seal/open helpers over an injected key holder, so the crypto is testable
+ * without a browser: only `getStoredKey`/`putStoredKey` touch IndexedDB.
+ */
+export function createSecretStore({ subtle, getStoredKey, putStoredKey, randomBytes }) {
+  let keyPromise = null
+
+  const key = () => {
+    keyPromise ??= (async () => {
+      const existing = await getStoredKey()
+
+      if (existing) {
+        return existing
+      }
+
+      // extractable: false — the key can encrypt and decrypt but its bytes can
+      // never be read back out, by this plugin or any other.
+      const fresh = await subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
+      await putStoredKey(fresh)
+
+      return fresh
+    })().catch(error => {
+      keyPromise = null
+
+      throw error
+    })
+
+    return keyPromise
+  }
+
+  return {
+    async seal(value) {
+      const iv = randomBytes(12)
+      const plain = new TextEncoder().encode(JSON.stringify(value))
+      const sealed = await subtle.encrypt({ name: 'AES-GCM', iv }, await key(), plain)
+
+      return { v: 1, iv: toBase64(iv), data: toBase64(sealed) }
+    },
+
+    async open(blob) {
+      if (!blob || blob.v !== 1) {
+        return null
+      }
+
+      try {
+        const plain = await subtle.decrypt(
+          { name: 'AES-GCM', iv: fromBase64(blob.iv) },
+          await key(),
+          fromBase64(blob.data)
+        )
+
+        return JSON.parse(new TextDecoder().decode(plain))
+      } catch {
+        // A rotated or missing key, or a tampered blob: treat as "not stored"
+        // rather than failing the connection.
+        return null
+      }
+    }
+  }
+}
+
+/** Promise-wrapped IndexedDB access for the one record we keep. */
+function withKeyStore(mode, run) {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(SECRET_DB, 1)
+
+    request.onupgradeneeded = () => request.result.createObjectStore(SECRET_STORE)
+    request.onerror = () => reject(request.error)
+    request.onsuccess = () => {
+      const db = request.result
+      const op = run(db.transaction(SECRET_STORE, mode).objectStore(SECRET_STORE))
+
+      op.onerror = () => reject(op.error)
+      op.onsuccess = () => resolve(op.result)
+    }
+  })
+}
+
+/** The browser-backed store. CryptoKey survives structured clone, so the key
+ *  itself lives in IndexedDB and never round-trips through JavaScript. */
+const secretStore = createSecretStore({
+  subtle: globalThis.crypto?.subtle,
+  randomBytes: length => globalThis.crypto.getRandomValues(new Uint8Array(length)),
+  getStoredKey: () => withKeyStore('readonly', store => store.get(SECRET_KEY_ID)),
+  putStoredKey: value => withKeyStore('readwrite', store => store.put(value, SECRET_KEY_ID))
+})
+
+/** Storage key for one machine's sealed credentials. */
+const secretKeyFor = machineId => `auth:${machineId}`
+
+async function rememberBasic(machineId, basic) {
+  try {
+    pluginCtx?.storage?.set?.(secretKeyFor(machineId), await secretStore.seal(basic))
+  } catch {
+    // No crypto or no IndexedDB: simply do not remember. Never fall back to
+    // writing the password in the clear.
+  }
+}
+
+async function recallBasic(machineId) {
+  try {
+    return await secretStore.open(pluginCtx?.storage?.get?.(secretKeyFor(machineId), null))
+  } catch {
+    return null
+  }
+}
+
+function forgetBasic(machineId) {
+  try {
+    pluginCtx?.storage?.remove?.(secretKeyFor(machineId))
+  } catch {
+    // Nothing stored.
+  }
+}
+
 /** Memoized across the plugin's lifetime: noVNC is loaded once per app session
  *  (and again after a hot reload, which re-evaluates this module). */
 let rfbPromise = null
@@ -802,6 +945,8 @@ export class VncSession {
     this.credentials = {}
     /** HTTP Basic credentials, for the life of this session only. */
     this.basic = null
+    /** True when this attempt is using stored credentials. */
+    this.usedSavedBasic = false
     this.disposers = []
   }
 
@@ -837,12 +982,23 @@ export class VncSession {
     }
 
     if (this.machine.httpAuth && !this.basic) {
-      // The endpoint is known to sit behind HTTP auth, so ask first: a
-      // handshake rejected for want of credentials reports only 1006.
-      $prompt.set({ kind: 'basic', token: this.token })
-      setStatus({ phase: 'connecting', message: 'Waiting for sign-in…', detail: '' })
+      const saved = this.machine.rememberAuth ? await recallBasic(this.machine.id) : null
 
-      return
+      if (this.stopped) {
+        return
+      }
+
+      if (saved) {
+        this.basic = saved
+        this.usedSavedBasic = true
+      } else {
+        // The endpoint is known to sit behind HTTP auth, so ask first: a
+        // handshake rejected for want of credentials reports only 1006.
+        $prompt.set({ kind: 'basic', token: this.token })
+        setStatus({ phase: 'connecting', message: 'Waiting for sign-in…', detail: '' })
+
+        return
+      }
     }
 
     const url = buildWsUrl(this.machine, { basic: this.basic })
@@ -1001,6 +1157,14 @@ export class VncSession {
       return
     }
 
+    if (!this.everConnected && this.usedSavedBasic) {
+      // The saved sign-in did not get us in, so it is stale or wrong. Drop it
+      // rather than retrying it forever, and let the next attempt ask.
+      forgetBasic(this.machine.id)
+      this.basic = null
+      this.usedSavedBasic = false
+    }
+
     const reachableProbe = this.everConnected ? Promise.resolve(null) : probeReachable(this.machine)
 
     void reachableProbe.then(reachable => {
@@ -1088,8 +1252,22 @@ export class VncSession {
   }
 
   /** Supply HTTP credentials and start the attempt that was waiting for them. */
-  provideBasic(basic) {
+  provideBasic(basic, remember) {
     this.basic = basic
+    this.usedSavedBasic = false
+
+    const machine = $machines.get().find(m => m.id === this.machine.id)
+
+    if (machine && Boolean(machine.rememberAuth) !== Boolean(remember)) {
+      updateMachine({ ...machine, rememberAuth: Boolean(remember) })
+    }
+
+    if (remember) {
+      void rememberBasic(this.machine.id, basic)
+    } else {
+      forgetBasic(this.machine.id)
+    }
+
     void this.connect()
   }
 
@@ -1904,12 +2082,19 @@ function MachineEditor() {
  */
 function CredentialsDialog() {
   const prompt = useValue($prompt)
+  const machines = useValue($machines)
+  const selectedId = useValue($selectedId)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [remember, setRemember] = useState(false)
 
   useEffect(() => {
     setUsername('')
     setPassword('')
+    setRemember(Boolean(machines.find(m => m.id === selectedId)?.rememberAuth))
+    // Seeded from the machine, but only when the prompt changes — retyping
+    // must not silently flip the user's choice mid-edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prompt])
 
   if (!prompt) {
@@ -1933,7 +2118,7 @@ function CredentialsDialog() {
     if (isBasic) {
       // Held on the session and sent as the URL's userinfo, which Chromium
       // turns into an Authorization header on the opening handshake.
-      owner.provideBasic({ username, password })
+      owner.provideBasic({ username, password }, remember)
     } else {
       owner.sendCredentials(needsUsername ? { username, password } : { password })
     }
@@ -1991,7 +2176,24 @@ function CredentialsDialog() {
               submit()
             }
           }
-        })
+        }),
+        isBasic
+          ? h(
+              'label',
+              { className: 'flex items-center justify-between gap-3' },
+              h(
+                'span',
+                { className: 'flex flex-col' },
+                h('span', { className: 'text-xs' }, 'Remember this sign-in'),
+                h(
+                  'span',
+                  { className: 'text-[0.65rem] text-(--ui-text-quaternary)' },
+                  'Encrypted with a key this app cannot read back, kept on this machine only.'
+                )
+              ),
+              h(Switch, { checked: remember, onCheckedChange: setRemember })
+            )
+          : null
       ),
       h(
         DialogFooter,
@@ -2091,6 +2293,8 @@ function duplicateMachine(machine) {
 }
 
 function removeMachine(id) {
+  forgetBasic(id)
+
   if ($selectedId.get() === id) {
     $selectedId.set(null)
   }
