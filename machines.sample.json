@@ -1,0 +1,70 @@
+{
+  "_comment": [
+    "The shape the plugin stores under the SDK key `hermes.plugin.hermes-novnc.machines`.",
+    "You do not need this file: add machines in the UI. It is here so you can see the",
+    "schema, and so a config can be reviewed or version-controlled before being pasted in.",
+    "Every host below is fake."
+  ],
+  "machines": [
+    {
+      "id": "m-workshop",
+      "name": "Workshop desktop",
+      "group": "Home lab",
+      "host": "127.0.0.1",
+      "port": 6080,
+      "path": "websockify",
+      "secure": false,
+      "viewOnly": true,
+      "shared": true,
+      "quality": 6,
+      "compression": 2,
+      "scale": "fit",
+      "httpAuth": false
+    },
+    {
+      "id": "m-builder",
+      "name": "Build box",
+      "group": "Home lab",
+      "host": "builder.tail9f2c.ts.net",
+      "port": 6080,
+      "path": "websockify",
+      "secure": false,
+      "viewOnly": false,
+      "shared": true,
+      "quality": 4,
+      "compression": 6,
+      "scale": "actual",
+      "httpAuth": false
+    },
+    {
+      "id": "m-kiosk",
+      "name": "Kiosk (TLS, token auth)",
+      "group": "Office",
+      "host": "kiosk.example.net",
+      "port": 443,
+      "path": "websockify?token=REPLACE_ME",
+      "secure": true,
+      "viewOnly": true,
+      "shared": false,
+      "quality": 8,
+      "compression": 2,
+      "scale": "fit",
+      "httpAuth": false
+    },
+    {
+      "id": "m-v6",
+      "name": "IPv6 host over a tunnel",
+      "group": "",
+      "host": "[fd00::1]",
+      "port": 6080,
+      "path": "websockify",
+      "secure": false,
+      "viewOnly": true,
+      "shared": true,
+      "quality": 6,
+      "compression": 2,
+      "scale": "fit",
+      "httpAuth": false
+    }
+  ]
+}
