@@ -169,7 +169,7 @@ websockify --cert=/etc/letsencrypt/live/HOST/fullchain.pem \
 Then tick **Use TLS** on the machine. Two warnings:
 
 - **A self-signed certificate will fail with close code 1015** and no useful detail, because the browser rejects it before any VNC traffic. Use a real certificate.
-- **Do not put HTTP Basic auth in front of it.** A browser cannot authenticate an HTTP challenge on a WebSocket handshake, so the plugin will never get through — see the README. Use a websockify token auth plugin if you need a secret in the URL.
+- **HTTP Basic auth in front of it is fine.** Tick "Endpoint is behind HTTP auth" on the machine and you will be asked to sign in at connect time; the credentials ride the WebSocket handshake as an `Authorization` header. A websockify token in the path works too, if you prefer a secret over a login.
 
 ---
 
@@ -192,7 +192,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:6080/
 | --- | --- |
 | "No answer from the endpoint" | Nothing is listening, or the port is firewalled. A closed port refuses instantly, so silence means filtered. Check the port, and whether the endpoint is actually TLS on 443 rather than plain `ws://` on 6080. |
 | "Cannot reach the host" | websockify is not running, or the tunnel is down. |
-| "Endpoint refused the WebSocket" | The host answered but would not upgrade — wrong path, or an HTTP auth layer in front. |
+| "Endpoint refused the WebSocket" | The host answered but would not upgrade — wrong path, or an HTTP auth layer in front. If it is auth, click **Sign in…** on the error. |
 | "Protocol error" (1002) | The path points at something that is not websockify. |
 | "TLS failure" (1015) | Certificate is self-signed, expired, or for the wrong hostname. |
 | "Authentication failed" | Wrong VNC password — an RFB-level rejection, not a transport one. |

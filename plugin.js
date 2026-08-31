@@ -252,20 +252,33 @@ export function parsePastedEndpoint(value) {
 /**
  * Build the WebSocket URL for a machine.
  *
- * Deliberately has no way to attach HTTP credentials. A browser offers no API
- * to set an `Authorization` header on `new WebSocket()`, and Chromium ignores
- * userinfo in a WebSocket URL (`wss://user:pass@host` connects with no
- * `Authorization` header at all rather than failing loudly), so offering a
- * username/password box here would be a promise this plugin cannot keep. Put
- * the secret in the path as a websockify token instead, or terminate auth at
- * the tunnel — both are covered in docs/remote-setup.md.
+ * `basic` attaches HTTP credentials for an endpoint behind a reverse-proxy
+ * auth_basic. There is no browser API to set an `Authorization` header on
+ * `new WebSocket()`, but Chromium *does* derive one from the URL's userinfo and
+ * send it on the opening handshake. That is verified, not assumed: the test
+ * harness logs the header it receives, and `--basic` in
+ * test/harness/rfb-server.mjs exists to prove it.
+ *
+ * Credentials are never persisted and never logged — `endpointLabel` and
+ * `buildProbeUrl` both build their strings without them.
  */
-export function buildWsUrl(machine) {
+export function buildWsUrl(machine, { basic } = {}) {
   const scheme = machine.secure ? 'wss' : 'ws'
   const port = Number(machine.port)
   const portPart = port && port !== SCHEME_DEFAULT_PORT[scheme] ? `:${port}` : ''
 
-  return `${scheme}://${machine.host}${portPart}/${normalizePath(machine.path)}`
+  // encodeURIComponent so a password containing : / @ or a space cannot break
+  // out of the userinfo field and retarget the connection.
+  const userinfo = basic?.username
+    ? `${encodeURIComponent(basic.username)}:${encodeURIComponent(basic.password ?? '')}@`
+    : ''
+
+  return `${scheme}://${userinfo}${machine.host}${portPart}/${normalizePath(machine.path)}`
+}
+
+/** A URL safe to show or log: userinfo replaced, never revealed. */
+export function redactUrl(url) {
+  return String(url).replace(/\/\/[^/@]*@/, '//••••@')
 }
 
 /** The http(s) twin of the websocket URL, for the reachability probe. Carries
@@ -357,12 +370,15 @@ export function describeClose({ code, reason, everConnected = false, reachable =
       }
 
       if (reachable === true) {
-        return terminal(
-          'Endpoint refused the WebSocket',
-          httpAuth
-            ? 'The host answered but would not upgrade the connection, and this machine is marked as sitting behind HTTP authentication. That cannot work from a browser: there is no way to set an Authorization header on a WebSocket, and Chromium ignores credentials in the URL. Expose websockify without an HTTP auth layer (put the access control on an SSH tunnel or Tailscale instead), or use a websockify token in the path.'
-            : 'The host answered but would not upgrade the connection. The usual causes are an auth layer in front of websockify (HTTP 401/403), a wrong path (HTTP 404), or a reverse proxy that is not forwarding the Upgrade headers. Browsers do not expose the HTTP status of a failed WebSocket handshake, so check the server log to see which.'
-        )
+        return {
+          ...terminal(
+            'Endpoint refused the WebSocket',
+            httpAuth
+              ? 'The host answered but would not upgrade the connection. Sign in and try again — the credentials ride along on the handshake.'
+              : 'The host answered but would not upgrade the connection. The usual causes are an auth layer in front of websockify (HTTP 401/403), a wrong path (HTTP 404), or a reverse proxy that is not forwarding the Upgrade headers. Browsers do not expose the HTTP status of a failed WebSocket handshake, so check the server log to see which.'
+          ),
+          fix: { label: httpAuth ? 'Sign in…' : 'Endpoint needs a sign-in…', signIn: true }
+        }
       }
 
       if (reachable === false) {
@@ -785,6 +801,8 @@ export class VncSession {
     this.lastClose = null
     this.cspBlocked = null
     this.credentials = {}
+    /** HTTP Basic credentials, for the life of this session only. */
+    this.basic = null
     this.disposers = []
   }
 
@@ -819,7 +837,16 @@ export class VncSession {
       return
     }
 
-    const url = buildWsUrl(this.machine)
+    if (this.machine.httpAuth && !this.basic) {
+      // The endpoint is known to sit behind HTTP auth, so ask first: a
+      // handshake rejected for want of credentials reports only 1006.
+      $prompt.set({ kind: 'basic', token: this.token })
+      setStatus({ phase: 'connecting', message: 'Waiting for sign-in…', detail: '' })
+
+      return
+    }
+
+    const url = buildWsUrl(this.machine, { basic: this.basic })
     this.lastClose = null
     this.cspBlocked = null
 
@@ -1059,6 +1086,12 @@ export class VncSession {
     const state = this.socket?.readyState
     this.teardownSocket()
     this.scheduleRetry(described ?? describeTimeout(this.machine, state))
+  }
+
+  /** Supply HTTP credentials and start the attempt that was waiting for them. */
+  provideBasic(basic) {
+    this.basic = basic
+    void this.connect()
   }
 
   /** Supply credentials the server asked for mid-handshake. */
@@ -1866,10 +1899,18 @@ function CredentialsDialog() {
     return null
   }
 
-  const needsUsername = Boolean(prompt.types?.includes('username'))
+  const isBasic = prompt.kind === 'basic'
+  const needsUsername = isBasic || Boolean(prompt.types?.includes('username'))
 
   const submit = () => {
-    owner.sendCredentials(needsUsername ? { username, password } : { password })
+    if (isBasic) {
+      // Held on the session and sent as the URL's userinfo, which Chromium
+      // turns into an Authorization header on the opening handshake.
+      owner.provideBasic({ username, password })
+    } else {
+      owner.sendCredentials(needsUsername ? { username, password } : { password })
+    }
+
     $prompt.set(null)
   }
 
@@ -1890,11 +1931,13 @@ function CredentialsDialog() {
       h(
         DialogHeader,
         null,
-        h(DialogTitle, null, 'VNC password'),
+        h(DialogTitle, null, isBasic ? 'Sign in to the endpoint' : 'VNC password'),
         h(
           DialogDescription,
           null,
-          'The VNC server asked for credentials. They are used for this connection only and are never saved.'
+          isBasic
+            ? 'This endpoint is behind HTTP authentication. The credentials are used for this connection only and are never saved.'
+            : 'The VNC server asked for credentials. They are used for this connection only and are never saved.'
         )
       ),
       h(
@@ -1989,11 +2032,28 @@ function updateMachine(machine) {
 function applyFix(fix) {
   const machine = $machines.get().find(m => m.id === $selectedId.get())
 
-  if (!machine || !fix?.patch) {
+  if (!machine || !fix) {
     return
   }
 
-  updateMachine({ ...machine, ...fix.patch })
+  if (fix.signIn) {
+    // Remember that this endpoint needs a sign-in (a flag, never the secret),
+    // then ask for the credentials and retry.
+    if (!machine.httpAuth) {
+      updateMachine({ ...machine, httpAuth: true })
+    }
+
+    if (session) {
+      session.basic = null
+      $prompt.set({ kind: 'basic', token: session.token })
+    }
+
+    return
+  }
+
+  if (fix.patch) {
+    updateMachine({ ...machine, ...fix.patch })
+  }
 }
 
 /** Copy a machine so a near-identical endpoint is one edit away. */

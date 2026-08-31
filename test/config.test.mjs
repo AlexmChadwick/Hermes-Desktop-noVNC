@@ -12,7 +12,8 @@ import {
   endpointLabel,
   normalizeMachine,
   normalizePath,
-  parsePastedEndpoint
+  parsePastedEndpoint,
+  redactUrl
 } from '../plugin.js'
 
 describe('normalizeMachine', () => {
@@ -198,11 +199,36 @@ describe('buildWsUrl', () => {
     assert.equal(buildWsUrl(base({ host: '[fd00::1]' })), 'ws://[fd00::1]:6080/websockify')
   })
 
-  it('never carries userinfo credentials', () => {
-    // Chromium ignores userinfo on a WebSocket URL, so the plugin must not
-    // pretend to support it. A second argument must not reintroduce one.
+  it('omits userinfo when no credentials are supplied', () => {
     assert.ok(!buildWsUrl(base({})).includes('@'))
-    assert.ok(!buildWsUrl(base({}), { basic: { username: 'a', password: 'b' } }).includes('@'))
+  })
+
+  it('carries HTTP Basic credentials as userinfo', () => {
+    // Verified against a real Chromium and a harness that logs the header it
+    // receives: the browser turns this into `Authorization: Basic …` on the
+    // opening handshake. An earlier version of this plugin wrongly believed
+    // Chromium ignored it and dropped the feature.
+    assert.equal(
+      buildWsUrl(base({}), { basic: { username: 'alex', password: 'hunter2' } }),
+      'ws://alex:hunter2@vnc.example.com:6080/websockify'
+    )
+  })
+
+  it('encodes credentials so they cannot break out of the userinfo field', () => {
+    // A password containing @ or / would otherwise retarget the connection.
+    const url = buildWsUrl(base({}), { basic: { username: 'a@b:c', password: 'p/@ss word' } })
+
+    assert.ok(url.startsWith('ws://a%40b%3Ac:p%2F%40ss%20word@vnc.example.com'))
+    assert.equal(new URL(url).hostname, 'vnc.example.com')
+  })
+
+  it('leaves credentials out of the label and the probe', () => {
+    const machine = base({})
+    const basic = { username: 'alex', password: 'hunter2' }
+
+    assert.ok(!endpointLabel(machine).includes('hunter2'))
+    assert.ok(!buildProbeUrl(machine).includes('hunter2'))
+    assert.ok(!redactUrl(buildWsUrl(machine, { basic })).includes('hunter2'))
   })
 
   it('carries a websockify token in the path, which is the mechanism that works', () => {

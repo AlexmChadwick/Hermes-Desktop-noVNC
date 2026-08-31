@@ -93,7 +93,22 @@ describe('describeClose', () => {
     const result = describeClose({ code: 1006, everConnected: false, reachable: true })
 
     assert.equal(result.retryable, false)
-    assert.match(result.detail, /401|404|Upgrade/)
+    assert.match(result.detail, /401|404|Upgrade|Sign in/)
+  })
+
+  it('offers a sign-in when a reachable host refuses the upgrade', () => {
+    // The recoverable case: an auth_basic in front of websockify. Credentials
+    // in the URL's userinfo do reach the server, so this is worth offering.
+    const result = describeClose({ code: 1006, everConnected: false, reachable: true })
+
+    assert.equal(result.fix?.signIn, true)
+  })
+
+  it('tells a machine already marked as needing auth to just sign in', () => {
+    const result = describeClose({ code: 1006, everConnected: false, reachable: true, httpAuth: true })
+
+    assert.match(result.detail, /Sign in/)
+    assert.equal(result.fix.label, 'Sign in…')
   })
 
   it('does not retry 1006 when nothing answered at all', () => {

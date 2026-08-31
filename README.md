@@ -8,6 +8,7 @@ Built on [noVNC](https://github.com/novnc/noVNC) **v1.7.0**, vendored verbatim u
 
 - **Machine list** — named entries with host, port, websockify path, `ws`/`wss`, an optional group, and per-machine display settings. Edit with the gear on the row or right-click for Edit / Duplicate / Remove. Persisted through the SDK's plugin storage.
 - **One-click switching** — selecting a machine disposes the previous connection before opening the next, so there is never a second socket in flight. The last-used machine is remembered across restarts.
+- **HTTP Basic auth** — endpoints behind an nginx `auth_basic` work: credentials are asked for at connect time and ride the handshake. Never stored.
 - **Real connection state** — connecting / connected / reconnecting / error, with the **actual WebSocket close code and the server's close reason** surfaced rather than a generic "disconnected", plus exponential backoff with equal jitter and a cancel button. An attempt that gets no answer within 12 seconds fails with a diagnosis instead of hanging: a filtered port never refuses a connection, so without that the pane would wait out Chromium's own TCP timeout. Where the diagnosis implies a specific correction — a plain `ws://` attempt that went silent is usually an https endpoint — the error offers a button that applies it.
 - **Display controls** — scale-to-fit or 1:1 (with drag-to-pan), view-only toggle, fullscreen-within-pane, quality and compression.
 - **Keyboard passthrough toggle** — stops Hermes' single-key shortcuts from eating keystrokes meant for the remote machine. See [the limitation](#keyboard-passthrough) below.
@@ -58,19 +59,15 @@ These are real constraints of the platform, found while building this. I would r
 
 The plugin SDK exposes **no secure storage**. `ctx.storage` is plain JSON in `localStorage`, and `ctx.os` offers clipboard/open/reveal but no keychain and no `safeStorage`. Since there is nowhere safe to put a password, this plugin **does not offer to remember one**. A VNC password is typed at connect time, held in a variable for the life of the connection, and dropped on disconnect.
 
-### HTTP Basic auth in front of websockify will not work
+### HTTP Basic auth in front of websockify
 
-If your endpoint sits behind an HTTP auth layer (nginx `auth_basic`, a proxy login page), a browser cannot get through it on a WebSocket:
+This **is** supported. If your endpoint sits behind an nginx `auth_basic` or similar, tick **Endpoint is behind HTTP auth** on the machine (or click **Sign in…** on the error). You are asked for a username and password at connect time, they travel as the WebSocket URL's userinfo, and Chromium turns that into an `Authorization: Basic` header on the opening handshake.
 
-- There is no browser API to set an `Authorization` header on `new WebSocket()`.
-- Chromium **ignores userinfo in a WebSocket URL** — `wss://user:pass@host/` connects with no `Authorization` header rather than failing loudly. Offering a username/password box would therefore be a promise this plugin could not keep, so there isn't one.
+There is no browser API to set that header directly, which is why this route is the one that works. It is verified rather than assumed: `test/harness/rfb-server.mjs --basic user:pass` rejects an unauthenticated upgrade with a 401 and logs the header it receives, and the browser check completes a full RFB session through it.
 
-Workable alternatives, in order of preference:
+Credentials are **never stored** — see above — and never logged: `endpointLabel` and `buildProbeUrl` build their strings without them, and `redactUrl` masks the userinfo anywhere a URL is displayed.
 
-1. Put the access control on the **tunnel** instead — an SSH tunnel or Tailscale, so websockify itself listens on loopback with no HTTP auth. This is what `docs/remote-setup.md` recommends anyway.
-2. Use a **websockify token** in the path (`websockify?token=…`) with a token auth plugin.
-
-Tick "Endpoint is behind HTTP auth" on a machine and the failure message will explain this instead of listing generic causes.
+> An earlier version of this plugin claimed the opposite and shipped without the feature, on the strength of a plausible-sounding reading of Chromium's source. Testing it took ten minutes and showed it was wrong.
 
 ### The HTTP status of a failed handshake is not visible
 

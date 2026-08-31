@@ -112,8 +112,14 @@
         const params = new URLSearchParams(location.search)
         const port = params.get('port') ?? '6080'
         const scenario = params.get('scenario') ?? 'ok'
-        const url = `ws://127.0.0.1:${port}/`
-        log('info', `scenario "${scenario}" against ${url}`)
+        // Credentials go in the userinfo, exactly as plugin.js's buildWsUrl
+        // does. Chromium turns them into an Authorization header on the
+        // opening handshake — the harness logs what it actually receives.
+        const user = params.get('user')
+        const pass = params.get('pass')
+        const userinfo = user ? `${encodeURIComponent(user)}:${encodeURIComponent(pass ?? '')}@` : ''
+        const url = `ws://${userinfo}127.0.0.1:${port}/`
+        log('info', `scenario "${scenario}" against ${url.replace(/\/\/[^/@]*@/, '//••••@')}`)
 
         const socket = new WebSocket(url)
         let close = null

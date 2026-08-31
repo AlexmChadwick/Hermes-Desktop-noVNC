@@ -14,6 +14,8 @@
  *   --fail-auth     reject the security handshake (RFB-level auth failure)
  *   --drop-after N  close abruptly N ms after connecting, with code 1011
  *   --refuse        accept the TCP connection but never upgrade (HTTP 404)
+ *   --basic u:p     require HTTP Basic auth on the upgrade, like an nginx
+ *                   auth_basic in front of websockify
  */
 
 import { createHash } from 'node:crypto'
@@ -197,6 +199,21 @@ function serverInit() {
 // --- Server ---------------------------------------------------------------
 
 const server = createServer((req, res) => {
+  const basic = flag('basic', null)
+
+  if (basic) {
+    const expected = `Basic ${Buffer.from(basic).toString('base64')}`
+
+    console.log(`[harness] GET ${req.url} Authorization: ${req.headers.authorization ?? '(none)'}`)
+
+    if (req.headers.authorization !== expected) {
+      res.writeHead(401, { 'www-authenticate': 'Basic realm="Desktop"' })
+      res.end()
+
+      return
+    }
+  }
+
   res.writeHead(200, { 'content-type': 'text/plain' })
   res.end('rfb harness: connect a WebSocket to this port\n')
 })
@@ -204,6 +221,28 @@ const server = createServer((req, res) => {
 let connections = 0
 
 server.on('upgrade', (req, socket) => {
+  const basic = flag('basic', null)
+
+  if (basic) {
+    const expected = `Basic ${Buffer.from(basic).toString('base64')}`
+    const offered = req.headers.authorization
+
+    console.log(`[harness] upgrade Authorization header: ${offered ? JSON.stringify(offered) : '(none sent)'}`)
+
+    if (offered !== expected) {
+      socket.end(
+        'HTTP/1.1 401 Unauthorized\r\n' +
+          'WWW-Authenticate: Basic realm="Desktop"\r\n' +
+          'Connection: close\r\n\r\n'
+      )
+      console.log('[harness] rejected the upgrade with HTTP 401')
+
+      return
+    }
+
+    console.log('[harness] Basic credentials accepted')
+  }
+
   if (has('refuse')) {
     // Answer the handshake with a non-101 so the browser reports 1006 with no
     // detail — exactly the case the plugin's reachability probe disambiguates.
