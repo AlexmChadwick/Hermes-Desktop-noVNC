@@ -22,13 +22,13 @@ The plugin must be installed on **the machine running the desktop app**, not on 
 **macOS / Linux**
 
 ```bash
-git clone https://github.com/alexchadwick/Hermes-noVNC ~/.hermes/desktop-plugins/hermes-novnc
+git clone https://github.com/AlexmChadwick/Hermes-Desktop-noVNC ~/.hermes/desktop-plugins/hermes-novnc
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-git clone https://github.com/alexchadwick/Hermes-noVNC $env:LOCALAPPDATA\hermes\desktop-plugins\hermes-novnc
+git clone https://github.com/AlexmChadwick/Hermes-Desktop-noVNC $env:LOCALAPPDATA\hermes\desktop-plugins\hermes-novnc
 ```
 
 Then reload plugins in Hermes Desktop: **Ctrl/Cmd+K → "Reload desktop plugins"**, or just restart the app. A **Machines** pane appears in the left rail and a **Remote Desktop** pane docks beside the conversation. Both are draggable, and Settings → Plugins can disable the plugin entirely.
