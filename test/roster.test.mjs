@@ -13,7 +13,7 @@ import { describe, it } from 'node:test'
 
 import { readFileSync } from 'node:fs'
 
-import { MachineRow, normalizeMachine, suggestFix } from '../plugin.js'
+import { clampTitlebarHeight, MachineRow, normalizeMachine, suggestFix } from '../plugin.js'
 
 /** Walk the element tree the stubbed createElement produces. */
 function* walk(node) {
@@ -146,7 +146,28 @@ describe('fullscreen layout', () => {
     // `fixed inset-0` put the pane's toolbar at y=0, on top of the window
     // controls at the top right, so the two sets of buttons overlapped.
     assert.ok(!/fixed inset-0 z-50/.test(source), 'fullscreen must not cover the titlebar')
-    assert.match(source, /top-\[var\(--titlebar-height,34px\)\]/)
+  })
+
+  it('does not take the offset from --titlebar-height', () => {
+    // The contrib shell that panes live in sets that variable to 0px, so
+    // `var(--titlebar-height,34px)` resolves to zero and the fallback never
+    // applies. Reading it was the reason the first fix changed nothing.
+    assert.ok(!/top-\[var\(--titlebar-height/.test(source), 'that variable is 0 inside panes')
+    assert.match(source, /appTitlebarHeight\(\)/)
+  })
+
+  describe('clampTitlebarHeight', () => {
+    it('accepts a plausible measurement', () => {
+      assert.equal(clampTitlebarHeight(34), 34)
+      assert.equal(clampTitlebarHeight(40.4), 40)
+    })
+
+    it('falls back when the measurement is missing, zero or absurd', () => {
+      // Zero is the exact value the CSS variable would have given us.
+      for (const value of [0, -5, undefined, null, NaN, 5000]) {
+        assert.equal(clampTitlebarHeight(value), 34, `expected fallback for ${value}`)
+      }
+    })
   })
 
   it('still covers the rest of the window', () => {

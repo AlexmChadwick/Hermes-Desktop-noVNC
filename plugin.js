@@ -1715,14 +1715,11 @@ function ViewerPane() {
     {
       className: cn(
         'flex h-full min-h-0 flex-col',
-        // Start below the app's own titlebar rather than under it. `inset-0`
-        // put this pane's toolbar at y=0, directly on top of the window
-        // controls at the top right, and the two sets of buttons overlapped.
-        // 34px is the app's TITLEBAR_HEIGHT, used as the fallback the same way
-        // the app's own full-height surfaces do.
-        fullscreen &&
-          'fixed right-0 bottom-0 left-0 top-[var(--titlebar-height,34px)] z-50 bg-(--ui-bg-editor)'
-      )
+        // Starts below the app's titlebar; the offset is applied as an inline
+        // style because it has to be measured — see appTitlebarHeight.
+        fullscreen && 'fixed right-0 bottom-0 left-0 z-50 bg-(--ui-bg-editor)'
+      ),
+      style: fullscreen ? { top: `${appTitlebarHeight()}px` } : undefined
     },
     h(ViewerToolbar, { machine, status, passthrough, setPassthrough, fullscreen }),
     h(
@@ -1867,6 +1864,30 @@ function ViewerToolbar({ machine, status, passthrough, setPassthrough, fullscree
       )
     )
   )
+}
+
+/** The app's titlebar is a fixed 34px strip; fall back to that when a
+ *  measurement is missing or implausible. Pure, so it can be tested. */
+export function clampTitlebarHeight(measured) {
+  return Number.isFinite(measured) && measured > 0 && measured < 120 ? Math.round(measured) : 34
+}
+
+/**
+ * How far down a full-window overlay must start to clear the app's titlebar.
+ *
+ * Measured rather than read from `--titlebar-height`: the contrib shell that
+ * panes live in sets that variable to `0px` on purpose, so `var(…, 34px)`
+ * resolves to zero and a fullscreen overlay lands on top of the window
+ * controls — which is exactly the overlap this exists to avoid.
+ */
+function appTitlebarHeight() {
+  try {
+    const bar = document.querySelector('[data-contrib-shell]')?.firstElementChild
+
+    return clampTitlebarHeight(bar?.getBoundingClientRect?.().height)
+  } catch {
+    return 34
+  }
 }
 
 /** Covers the canvas whenever we are not showing live pixels. */
