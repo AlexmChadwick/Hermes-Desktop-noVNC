@@ -190,6 +190,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:6080/
 
 | Symptom in the pane | Where to look |
 | --- | --- |
+| "No answer from the endpoint" | Nothing is listening, or the port is firewalled. A closed port refuses instantly, so silence means filtered. Check the port, and whether the endpoint is actually TLS on 443 rather than plain `ws://` on 6080. |
 | "Cannot reach the host" | websockify is not running, or the tunnel is down. |
 | "Endpoint refused the WebSocket" | The host answered but would not upgrade — wrong path, or an HTTP auth layer in front. |
 | "Protocol error" (1002) | The path points at something that is not websockify. |

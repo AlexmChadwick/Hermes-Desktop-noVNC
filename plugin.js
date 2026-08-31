@@ -56,6 +56,12 @@ import {
   Button,
   cn,
   Codicon,
+  ConfirmDialog,
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -394,6 +400,48 @@ export function describeClose({ code, reason, everConnected = false, reachable =
 }
 
 /**
+ * How long an attempt may sit with no answer before it counts as failed.
+ *
+ * A filtered port never refuses a connection, so the browser keeps waiting on
+ * the TCP handshake until its own timeout — minutes. Without this the pane sits
+ * on "Connecting…" forever with nothing to act on.
+ */
+export const CONNECT_TIMEOUT_MS = 12_000
+
+/**
+ * Diagnose an attempt that never got anywhere, given the socket's readyState.
+ * `0` is CONNECTING: nothing answered at all. Anything further means the
+ * endpoint accepted a socket but never finished the VNC handshake.
+ */
+export function describeTimeout(machine, socketState) {
+  const seconds = Math.round(CONNECT_TIMEOUT_MS / 1000)
+
+  if (socketState === 0) {
+    const tlsHint = machine.secure
+      ? ''
+      : ' If the endpoint is served over https, turn on Use TLS and use port 443 — a plain ws:// connection to an https endpoint looks exactly like this.'
+
+    return {
+      title: 'No answer from the endpoint',
+      detail:
+        `Nothing answered at ${machine.host}:${machine.port} within ${seconds} seconds. A closed port refuses ` +
+        `immediately, so silence points at a firewall, a tunnel that is down, or the wrong port.${tlsHint}`,
+      retryable: true,
+      code: null
+    }
+  }
+
+  return {
+    title: 'Endpoint never completed the handshake',
+    detail:
+      `${machine.host}:${machine.port} accepted the connection but did not finish the VNC handshake within ` +
+      `${seconds} seconds. That usually means the path does not point at websockify.`,
+    retryable: true,
+    code: null
+  }
+}
+
+/**
  * The status object an error should produce.
  *
  * Exported so a test can hold it to its contract: the close code has to reach
@@ -637,6 +685,8 @@ const $selectedId = atom(null)
 /** { phase, message, detail, attempt, nextRetryAt, desktopName } */
 const $status = atom({ phase: 'idle' })
 const $editing = atom(null)
+/** Machine awaiting delete confirmation, or null. */
+const $confirmRemove = atom(null)
 /** VNC credentials prompt: { types, token } or null. `token` is the id of the
  *  session that asked, so a stale prompt can never be answered into another. */
 const $prompt = atom(null)
@@ -709,6 +759,7 @@ export class VncSession {
     this.rfb = null
     this.socket = null
     this.timer = null
+    this.connectTimer = null
     this.attempt = 0
     this.connectedAt = 0
     this.everConnected = false
@@ -815,6 +866,7 @@ export class VncSession {
     }
 
     on('connect', () => {
+      this.clearConnectTimer()
       // Connected without needing them after all (a retry that did not
       // re-challenge); a prompt still on screen would sit over a live desktop.
       clearPromptFor(this.token)
@@ -847,6 +899,21 @@ export class VncSession {
         void pluginCtx?.os?.writeClipboard?.(text)
       }
     })
+
+    // Arm the stall detector last, so it covers the whole attempt: the TCP and
+    // WebSocket handshakes as well as the VNC one. Cleared by 'connect' and by
+    // any teardown.
+    this.connectTimer = setTimeout(() => {
+      this.connectTimer = null
+      this.failAttempt()
+    }, CONNECT_TIMEOUT_MS)
+  }
+
+  clearConnectTimer() {
+    if (this.connectTimer) {
+      clearTimeout(this.connectTimer)
+      this.connectTimer = null
+    }
   }
 
   /**
@@ -912,46 +979,66 @@ export class VncSession {
             httpAuth: this.machine.httpAuth
           })
 
-      if (!described.retryable) {
-        $status.set(errorStatus(described))
-
-        return
-      }
-
-      // Only a connection that lasted counts as success; otherwise an
-      // accept-then-drop server would reset the backoff on every cycle.
-      if (this.everConnected && Date.now() - this.connectedAt >= BACKOFF.stableMs) {
-        this.attempt = 0
-      }
-
-      if (this.attempt >= BACKOFF.maxAttempts) {
-        $status.set(
-          errorStatus({
-            ...described,
-            title: 'Gave up reconnecting',
-            detail: `${described.detail} Stopped after ${BACKOFF.maxAttempts} attempts.`
-          })
-        )
-
-        return
-      }
-
-      const delay = backoffDelay(this.attempt)
-      this.attempt += 1
-
-      setStatus({
-        phase: 'reconnecting',
-        message: described.title,
-        detail: described.detail,
-        attempt: this.attempt,
-        nextRetryAt: Date.now() + delay
-      })
-
-      this.timer = setTimeout(() => {
-        this.timer = null
-        void this.connect()
-      }, delay)
+      this.scheduleRetry(described)
     })
+  }
+
+  /** Apply the retry policy to a described failure, whatever produced it. */
+  scheduleRetry(described) {
+    if (this.stopped) {
+      return
+    }
+
+    if (!described.retryable) {
+      $status.set(errorStatus(described))
+
+      return
+    }
+
+    // Only a connection that lasted counts as success; otherwise an
+    // accept-then-drop server would reset the backoff on every cycle.
+    if (this.everConnected && Date.now() - this.connectedAt >= BACKOFF.stableMs) {
+      this.attempt = 0
+    }
+
+    if (this.attempt >= BACKOFF.maxAttempts) {
+      $status.set(
+        errorStatus({
+          ...described,
+          title: 'Gave up reconnecting',
+          detail: `${described.detail} Stopped after ${BACKOFF.maxAttempts} attempts.`
+        })
+      )
+
+      return
+    }
+
+    const delay = backoffDelay(this.attempt)
+    this.attempt += 1
+
+    setStatus({
+      phase: 'reconnecting',
+      message: described.title,
+      detail: described.detail,
+      attempt: this.attempt,
+      nextRetryAt: Date.now() + delay
+    })
+
+    this.timer = setTimeout(() => {
+      this.timer = null
+      void this.connect()
+    }, delay)
+  }
+
+  /** Abandon an attempt that never opened or never handshook. */
+  failAttempt(described) {
+    if (this.stopped) {
+      return
+    }
+
+    const state = this.socket?.readyState
+    this.teardownSocket()
+    this.scheduleRetry(described ?? describeTimeout(this.machine, state))
   }
 
   /** Supply credentials the server asked for mid-handshake. */
@@ -975,6 +1062,8 @@ export class VncSession {
   }
 
   teardownSocket() {
+    this.clearConnectTimer()
+
     // The prompt cannot outlive the attempt that raised it: answering it later
     // would hand this machine's password to whichever session is current.
     clearPromptFor(this.token)
@@ -1146,11 +1235,11 @@ function MachinesPane() {
 }
 
 function MachineRow({ machine, selected, phase }) {
-  return h(
+  const row = h(
     'div',
     {
       className: cn(
-        'group flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs',
+        'group flex min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs',
         selected ? 'bg-(--ui-stroke-secondary)' : 'hover:bg-(--ui-stroke-secondary)/50'
       ),
       onClick: () => selectMachine(machine.id),
@@ -1174,14 +1263,19 @@ function MachineRow({ machine, selected, phase }) {
       h('div', { className: 'truncate' }, machine.name),
       h('div', { className: 'truncate text-[0.65rem] text-(--ui-text-quaternary)' }, endpointLabel(machine))
     ),
-    machine.viewOnly ? h(Codicon, { name: 'eye', className: 'text-[0.7rem] text-(--ui-text-quaternary)' }) : null,
+    machine.viewOnly
+      ? h(Codicon, { name: 'eye', className: 'shrink-0 text-[0.7rem] text-(--ui-text-quaternary)' })
+      : null,
+    // Always visible, not hover-only: a control you cannot see is a control
+    // you do not have. The context menu below carries the same actions.
     h(
       Button,
       {
         type: 'button',
         variant: 'ghost',
         size: 'sm',
-        className: 'h-5 px-1 opacity-0 group-hover:opacity-100',
+        className: 'h-5 shrink-0 px-1 opacity-60 group-hover:opacity-100',
+        title: 'Edit machine',
         onClick: event => {
           event.stopPropagation()
           $editing.set(machine)
@@ -1190,6 +1284,47 @@ function MachineRow({ machine, selected, phase }) {
       h(Codicon, { name: 'settings-gear', className: 'text-[0.7rem]' })
     )
   )
+
+  return h(
+    ContextMenu,
+    null,
+    h(ContextMenuTrigger, { asChild: true }, row),
+    h(
+      ContextMenuContent,
+      null,
+      h(ContextMenuItem, { onSelect: () => $editing.set(machine) }, 'Edit…'),
+      h(ContextMenuItem, { onSelect: () => duplicateMachine(machine) }, 'Duplicate'),
+      h(ContextMenuSeparator, null),
+      h(
+        ContextMenuItem,
+        { variant: 'destructive', onSelect: () => $confirmRemove.set(machine) },
+        'Remove…'
+      )
+    )
+  )
+}
+
+/** Confirmation for a destructive roster edit. Mounted with the roster so it
+ *  is reachable from both the context menu and the editor's Remove button. */
+function RemoveMachineDialog() {
+  const machine = useValue($confirmRemove)
+
+  if (!machine) {
+    return null
+  }
+
+  return h(ConfirmDialog, {
+    open: true,
+    destructive: true,
+    title: `Remove ${machine.name}?`,
+    description: `${endpointLabel(machine)} will be removed from the roster. Nothing on the remote machine is affected.`,
+    confirmLabel: 'Remove',
+    onClose: () => $confirmRemove.set(null),
+    onConfirm: () => {
+      removeMachine(machine.id)
+      $confirmRemove.set(null)
+    }
+  })
 }
 
 /** The viewer: toolbar plus the element noVNC attaches its canvas to. */
@@ -1638,8 +1773,9 @@ function MachineEditor() {
                 size: 'sm',
                 className: 'mr-auto text-red-500',
                 onClick: () => {
-                  removeMachine(draft.id)
+                  const target = $machines.get().find(m => m.id === draft.id) ?? draft
                   $editing.set(null)
+                  $confirmRemove.set(target)
                 }
               },
               'Remove'
@@ -1810,6 +1946,13 @@ function updateMachine(machine) {
   upsertMachine(machine)
 }
 
+/** Copy a machine so a near-identical endpoint is one edit away. */
+function duplicateMachine(machine) {
+  const copy = normalizeMachine({ ...machine, name: `${machine.name} copy` }, { id: undefined }).machine
+
+  upsertMachine({ ...copy, id: `m-${Math.random().toString(36).slice(2, 10)}` })
+}
+
 function removeMachine(id) {
   if ($selectedId.get() === id) {
     $selectedId.set(null)
@@ -1858,7 +2001,7 @@ export default {
       area: PANES_AREA,
       title: 'Machines',
       data: { placement: 'left', width: '240px' },
-      render: () => h(MachinesPane)
+      render: () => h('div', { className: 'flex h-full min-h-0 flex-col' }, h(MachinesPane), h(MachineEditor), h(RemoveMachineDialog))
     })
 
     ctx.register({
@@ -1870,7 +2013,7 @@ export default {
       // shows that sidebar.)
       data: { placement: 'main', dock: { pane: 'workspace', pos: 'right' }, width: '520px' },
       render: () =>
-        h('div', { className: 'flex h-full min-h-0 flex-col' }, h(ViewerPane), h(MachineEditor), h(CredentialsDialog))
+        h('div', { className: 'flex h-full min-h-0 flex-col' }, h(ViewerPane), h(CredentialsDialog))
     })
 
     ctx.register({

@@ -6,9 +6,9 @@ Built on [noVNC](https://github.com/novnc/noVNC) **v1.7.0**, vendored verbatim u
 
 ## What you get
 
-- **Machine list** — named entries with host, port, websockify path, `ws`/`wss`, an optional group, and per-machine display settings. Persisted through the SDK's plugin storage.
+- **Machine list** — named entries with host, port, websockify path, `ws`/`wss`, an optional group, and per-machine display settings. Edit with the gear on the row or right-click for Edit / Duplicate / Remove. Persisted through the SDK's plugin storage.
 - **One-click switching** — selecting a machine disposes the previous connection before opening the next, so there is never a second socket in flight. The last-used machine is remembered across restarts.
-- **Real connection state** — connecting / connected / reconnecting / error, with the **actual WebSocket close code and the server's close reason** surfaced rather than a generic "disconnected", plus exponential backoff with equal jitter and a cancel button.
+- **Real connection state** — connecting / connected / reconnecting / error, with the **actual WebSocket close code and the server's close reason** surfaced rather than a generic "disconnected", plus exponential backoff with equal jitter and a cancel button. An attempt that gets no answer within 12 seconds fails with a diagnosis instead of hanging: a filtered port never refuses a connection, so without that the pane would wait out Chromium's own TCP timeout.
 - **Display controls** — scale-to-fit or 1:1 (with drag-to-pan), view-only toggle, fullscreen-within-pane, quality and compression.
 - **Keyboard passthrough toggle** — stops Hermes' single-key shortcuts from eating keystrokes meant for the remote machine. See [the limitation](#keyboard-passthrough) below.
 - **Clipboard** — remote → local automatically; local → remote on paste.

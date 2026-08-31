@@ -85,3 +85,54 @@ describe('Codicon names', () => {
     assert.deepEqual(missing, [], `unknown codicon name(s): ${missing.join(', ')}`)
   })
 })
+
+describe('SDK imports', () => {
+  const SDK_INDEX = path.join(APP_SRC, 'sdk/index.ts')
+
+  // Every name plugin.js pulls out of the SDK, from its (multi-line) import.
+  // Anchored to a line-start `import` with `[^}]*`: the file header quotes an
+  // import statement in prose, and a looser pattern matched that comment
+  // instead — the same "prose looks like code" trap the loader itself sets.
+  const imported = (() => {
+    const block = source.match(/^import\s*\{([^}]*)\}\s*from\s*'@hermes\/plugin-sdk'/m)
+
+    return block
+      ? block[1]
+          .split(',')
+          .map(name => name.trim())
+          .filter(Boolean)
+      : []
+  })()
+
+  it('finds the SDK import block', () => {
+    assert.ok(imported.length > 0, 'expected plugin.js to import from @hermes/plugin-sdk')
+  })
+
+  it('imports only names the real SDK exports', { skip: !existsSync(SDK_INDEX) }, () => {
+    // The shim does `export const { …names } = sdk`, so a name the SDK does not
+    // export is a hard failure the moment the plugin is imported.
+    const sdk = readFileSync(SDK_INDEX, 'utf8')
+    const missing = imported.filter(name => {
+      const patterns = [
+        new RegExp(`^\\s*export\\s+(const|function|class)\\s+${name}\\b`, 'm'),
+        new RegExp(`^\\s*${name}\\s*(,|$)`, 'm'),
+        new RegExp(`\\b${name}\\s+as\\b`),
+        new RegExp(`\\bas\\s+${name}\\b`),
+        new RegExp(`export\\s*\\{[^}]*\\b${name}\\b[^}]*\\}`, 's')
+      ]
+
+      return !patterns.some(pattern => pattern.test(sdk))
+    })
+
+    assert.deepEqual(missing, [], `not exported by the SDK: ${missing.join(', ')}`)
+  })
+
+  it('is mirrored by the test stub, so the suite cannot pass on a fiction', () => {
+    // The stub once carried a wrong PALETTE_AREA value and a browser assertion
+    // passed against it rather than against the app.
+    const stub = readFileSync(new URL('./stubs/sdk.mjs', import.meta.url), 'utf8')
+    const missing = imported.filter(name => !new RegExp(`\\b${name}\\b`).test(stub))
+
+    assert.deepEqual(missing, [], `missing from test/stubs/sdk.mjs: ${missing.join(', ')}`)
+  })
+})

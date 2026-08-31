@@ -48,6 +48,12 @@ export const PALETTE_AREA = 'palette'
 export const PANES_AREA = 'panes'
 
 export const Button = component('Button')
+export const ConfirmDialog = component('ConfirmDialog')
+export const ContextMenu = component('ContextMenu')
+export const ContextMenuContent = component('ContextMenuContent')
+export const ContextMenuItem = component('ContextMenuItem')
+export const ContextMenuSeparator = component('ContextMenuSeparator')
+export const ContextMenuTrigger = component('ContextMenuTrigger')
 export const Codicon = component('Codicon')
 export const Dialog = component('Dialog')
 export const DialogContent = component('DialogContent')

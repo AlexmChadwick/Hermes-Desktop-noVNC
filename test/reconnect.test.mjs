@@ -6,7 +6,9 @@ import {
   BACKOFF,
   backoffDelay,
   describeClose,
+  CONNECT_TIMEOUT_MS,
   describeSecurityFailure,
+  describeTimeout,
   errorStatus,
   promptOwner,
   VncSession
@@ -319,5 +321,115 @@ describe('VncSession.applyDisplaySettings', () => {
 
   it('gives each session a distinct token', () => {
     assert.notEqual(new VncSession(machine(), null).token, new VncSession(machine(), null).token)
+  })
+})
+
+describe('describeTimeout', () => {
+  const machine = extra => ({ host: 'vnc.example.com', port: 6080, secure: false, ...extra })
+
+  it('is retryable — a stalled attempt is often a transient network problem', () => {
+    assert.equal(describeTimeout(machine(), 0).retryable, true)
+  })
+
+  it('names the endpoint that went quiet', () => {
+    const described = describeTimeout(machine(), 0)
+
+    assert.match(described.detail, /vnc\.example\.com:6080/)
+    assert.match(described.title, /No answer/)
+  })
+
+  it('explains that silence is not the same as refusal', () => {
+    // The distinction that matters: a closed port refuses instantly, so a hang
+    // means filtered/firewalled rather than "nothing is listening".
+    assert.match(describeTimeout(machine(), 0).detail, /refuses immediately|firewall|tunnel/)
+  })
+
+  it('suggests TLS when a plain ws attempt to an https endpoint stalls', () => {
+    assert.match(describeTimeout(machine({ secure: false }), 0).detail, /Use TLS|443/)
+  })
+
+  it('does not suggest TLS when it is already on', () => {
+    assert.doesNotMatch(describeTimeout(machine({ secure: true, port: 443 }), 0).detail, /turn on Use TLS/)
+  })
+
+  it('distinguishes a socket that opened but never handshook', () => {
+    const described = describeTimeout(machine(), 1)
+
+    assert.match(described.title, /never completed the handshake/)
+    assert.match(described.detail, /websockify/)
+  })
+
+  it('quotes the timeout it actually used', () => {
+    const seconds = String(Math.round(CONNECT_TIMEOUT_MS / 1000))
+
+    assert.ok(describeTimeout(machine(), 0).detail.includes(seconds))
+  })
+
+  it('is long enough to outlast a slow but working connection', () => {
+    assert.ok(CONNECT_TIMEOUT_MS >= 8000, 'too short would abort healthy links on slow networks')
+    assert.ok(CONNECT_TIMEOUT_MS <= 30000, 'too long and the pane just looks hung')
+  })
+})
+
+describe('VncSession stall handling', () => {
+  const machine = { id: 'm1', host: 'h.example.com', port: 6080, secure: false, viewOnly: true, quality: 6, compression: 2, scale: 'fit', shared: true }
+
+  const stalled = () => {
+    const session = new VncSession(machine, null)
+    session.socket = { readyState: 0, close() {} } // CONNECTING: nothing answered
+
+    return session
+  }
+
+  it('turns a stalled attempt into a scheduled retry', () => {
+    // The bug this pins: with no stall detector the pane sat on "Connecting…"
+    // until Chromium's own TCP timeout, because a filtered port never refuses.
+    const session = stalled()
+
+    session.failAttempt()
+
+    assert.equal(session.attempt, 1, 'should have consumed one retry attempt')
+    assert.ok(session.timer, 'should have scheduled the next attempt')
+    session.cancelTimer()
+  })
+
+  it('backs off across repeated stalls instead of hammering', () => {
+    const session = stalled()
+
+    session.failAttempt()
+    session.cancelTimer()
+    session.socket = { readyState: 0, close() {} }
+    session.failAttempt()
+
+    assert.equal(session.attempt, 2)
+    session.cancelTimer()
+  })
+
+  it('gives up rather than retrying a dead endpoint forever', () => {
+    const session = stalled()
+    session.attempt = BACKOFF.maxAttempts
+
+    session.failAttempt()
+
+    assert.equal(session.timer, null, 'must not schedule past the attempt cap')
+  })
+
+  it('does nothing once the session has been disposed', () => {
+    const session = stalled()
+    session.dispose()
+
+    session.failAttempt()
+
+    assert.equal(session.attempt, 0)
+    assert.equal(session.timer, null)
+  })
+
+  it('clears the stall timer when it tears down', () => {
+    const session = new VncSession(machine, null)
+    session.connectTimer = setTimeout(() => {}, 60_000)
+
+    session.teardownSocket()
+
+    assert.equal(session.connectTimer, null, 'a stale timer would fail a later attempt')
   })
 })
