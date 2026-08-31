@@ -138,3 +138,18 @@ describe('roster layout', () => {
     assert.ok(gears.length >= 2, 'expected an edit control on both the row and the toolbar')
   })
 })
+
+describe('fullscreen layout', () => {
+  const source = readFileSync(new URL('../plugin.js', import.meta.url), 'utf8')
+
+  it('starts below the app titlebar instead of covering it', () => {
+    // `fixed inset-0` put the pane's toolbar at y=0, on top of the window
+    // controls at the top right, so the two sets of buttons overlapped.
+    assert.ok(!/fixed inset-0 z-50/.test(source), 'fullscreen must not cover the titlebar')
+    assert.match(source, /top-\[var\(--titlebar-height,34px\)\]/)
+  })
+
+  it('still covers the rest of the window', () => {
+    assert.match(source, /fixed right-0 bottom-0 left-0/)
+  })
+})

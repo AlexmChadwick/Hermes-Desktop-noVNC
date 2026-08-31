@@ -1537,7 +1537,13 @@ function ViewerPane() {
     {
       className: cn(
         'flex h-full min-h-0 flex-col',
-        fullscreen && 'fixed inset-0 z-50 bg-(--ui-bg-editor)'
+        // Start below the app's own titlebar rather than under it. `inset-0`
+        // put this pane's toolbar at y=0, directly on top of the window
+        // controls at the top right, and the two sets of buttons overlapped.
+        // 34px is the app's TITLEBAR_HEIGHT, used as the fallback the same way
+        // the app's own full-height surfaces do.
+        fullscreen &&
+          'fixed right-0 bottom-0 left-0 top-[var(--titlebar-height,34px)] z-50 bg-(--ui-bg-editor)'
       )
     },
     h(ViewerToolbar, { machine, status, passthrough, setPassthrough, fullscreen }),
