@@ -187,10 +187,16 @@ Observed in Chromium:
 | Plugin load | `plugin.js` evaluated in a browser and registered 2 panes (`left`, `main`), 2 palette entries, and an `onDispose` cleanup; both `render()` calls returned elements |
 | Host loader acceptance | The loader's own text scan run verbatim over `plugin.js` — see [the gotcha](#a-loader-gotcha-worth-knowing), which is how the first install failed |
 | SDK/UI contracts | Every SDK import, component prop, CSS custom property and Codicon name checked against the installed app source; the CSS and icon checks run against it on every test run |
+| Session lifecycle | `VncSession` display-setting and credential-ownership rules unit-tested directly, after a review found live toggles never reached the connection |
 | Reachability probe | A live host resolves opaque (`type=opaque status=0`); a dead port throws `TypeError: Failed to fetch` — so the two really are distinguishable |
 
-Three bugs were caught by testing rather than by reading the code — the third
-only by the real app, which is why its check is now replicated in the suite. Pasting a bare
+Nine bugs were caught this way rather than by reading the code — one only by
+the real app, which is why its check is now replicated in the suite. The two
+worst were silent: every tooltip passed `content` where the component wants
+`label`, so no tooltip ever rendered; and the View only toggle re-applied the
+machine object captured when the session was built, so the toolbar could read
+"View only" while input still reached the remote machine. Neither produced an
+error anywhere. Pasting a bare
 `host:port` silently wiped the default websockify path. And the reachability
 probe used `redirect: 'manual'`, which makes Chromium reject the promise even
 when the host answered — every failure would have been reported as "cannot

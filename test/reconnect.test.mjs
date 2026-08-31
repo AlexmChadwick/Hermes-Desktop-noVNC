@@ -2,7 +2,15 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { BACKOFF, backoffDelay, describeClose, describeSecurityFailure, errorStatus } from '../plugin.js'
+import {
+  BACKOFF,
+  backoffDelay,
+  describeClose,
+  describeSecurityFailure,
+  errorStatus,
+  promptOwner,
+  VncSession
+} from '../plugin.js'
 
 describe('backoffDelay', () => {
   it('is deterministic when random is injected', () => {
@@ -199,5 +207,117 @@ describe('errorStatus', () => {
     assert.equal(status.message, 'Gave up reconnecting')
     assert.equal(status.detail, 'x')
     assert.equal(status.code, 1006)
+  })
+})
+
+describe('promptOwner', () => {
+  // Guards the credential-misdirection path: a prompt raised by one session and
+  // answered after the user switched machines must not reach the new session.
+  it('returns the session when the tokens match', () => {
+    const session = { token: 7 }
+
+    assert.equal(promptOwner(session, { token: 7 }), session)
+  })
+
+  it('refuses a prompt raised by a different session', () => {
+    assert.equal(promptOwner({ token: 8 }, { token: 7 }), null)
+  })
+
+  it('refuses when there is no live session', () => {
+    assert.equal(promptOwner(null, { token: 7 }), null)
+  })
+
+  it('refuses when there is no prompt', () => {
+    assert.equal(promptOwner({ token: 7 }, null), null)
+  })
+
+  it('never matches two token-less objects', () => {
+    // `undefined === undefined` would otherwise be a match, which is exactly
+    // the accident this check exists to prevent.
+    assert.equal(promptOwner({}, {}), null)
+    assert.equal(promptOwner({ token: undefined }, { token: undefined }), null)
+  })
+})
+
+describe('VncSession.applyDisplaySettings', () => {
+  const machine = extra => ({
+    id: 'm1',
+    viewOnly: true,
+    quality: 6,
+    compression: 2,
+    scale: 'fit',
+    shared: true,
+    host: 'h.example.com',
+    ...extra
+  })
+
+  const withStubRfb = m => {
+    const session = new VncSession(m, null)
+    session.rfb = {}
+
+    return session
+  }
+
+  it('applies the machine it is given, not the one captured at construction', () => {
+    // The bug this pins: editing a machine creates a NEW object, so re-applying
+    // the constructor's captured one silently undid every toggle.
+    const session = withStubRfb(machine({ viewOnly: true }))
+
+    session.applyDisplaySettings(machine({ viewOnly: false }))
+
+    assert.equal(session.rfb.viewOnly, false)
+  })
+
+  it('re-asserts view-only when the user turns control back off', () => {
+    // The dangerous direction: the toolbar would read "View only" while input
+    // still reached the remote machine.
+    const session = withStubRfb(machine({ viewOnly: false }))
+
+    session.applyDisplaySettings(machine({ viewOnly: true }))
+
+    assert.equal(session.rfb.viewOnly, true)
+  })
+
+  it('adopts the edited machine so later reads see it', () => {
+    const session = withStubRfb(machine())
+
+    session.applyDisplaySettings(machine({ quality: 9 }))
+
+    assert.equal(session.machine.quality, 9)
+    assert.equal(session.rfb.qualityLevel, 9)
+  })
+
+  it('falls back to the stored machine when called with no argument', () => {
+    const session = withStubRfb(machine({ compression: 7 }))
+
+    session.applyDisplaySettings()
+
+    assert.equal(session.rfb.compressionLevel, 7)
+  })
+
+  it('maps scale onto the right pair of noVNC flags', () => {
+    const fit = withStubRfb(machine({ scale: 'fit' }))
+    fit.applyDisplaySettings()
+
+    assert.equal(fit.rfb.scaleViewport, true)
+    assert.equal(fit.rfb.clipViewport, false)
+
+    const actual = withStubRfb(machine({ scale: 'actual' }))
+    actual.applyDisplaySettings()
+
+    assert.equal(actual.rfb.scaleViewport, false)
+    assert.equal(actual.rfb.clipViewport, true)
+  })
+
+  it('does not throw before a connection exists', () => {
+    const session = new VncSession(machine(), null)
+
+    session.applyDisplaySettings(machine({ viewOnly: false }))
+
+    assert.equal(session.machine.viewOnly, false)
+  })
+
+  it('gives each session a distinct token', () => {
+    assert.notEqual(new VncSession(machine(), null).token, new VncSession(machine(), null).token)
   })
 })

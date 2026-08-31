@@ -597,9 +597,11 @@ async function loadRfbClass() {
       return url
     }
 
-    const entryUrl = await build(NOVNC_ENTRY)
-
     try {
+      // `build` is inside the try: a graph that fails partway has still created
+      // blob URLs for every module up to the failure, and each retry would
+      // otherwise leak another full set.
+      const entryUrl = await build(NOVNC_ENTRY)
       const module = await import(/* @vite-ignore */ entryUrl)
 
       if (typeof module.default !== 'function') {
@@ -608,8 +610,8 @@ async function loadRfbClass() {
 
       return module.default
     } finally {
-      // The graph is fully instantiated by now and noVNC contains no dynamic
-      // imports, so the URLs are dead weight — release them.
+      // On success the graph is fully instantiated and noVNC has no dynamic
+      // imports, so the URLs are dead weight; on failure they are litter.
       created.forEach(url => URL.revokeObjectURL(url))
     }
   })().catch(error => {
@@ -635,8 +637,32 @@ const $selectedId = atom(null)
 /** { phase, message, detail, attempt, nextRetryAt, desktopName } */
 const $status = atom({ phase: 'idle' })
 const $editing = atom(null)
-/** VNC credentials prompt: { types } or null. */
+/** VNC credentials prompt: { types, token } or null. `token` is the id of the
+ *  session that asked, so a stale prompt can never be answered into another. */
 const $prompt = atom(null)
+
+/**
+ * The session entitled to answer `prompt`, or null.
+ *
+ * Exported because this is the check that stops one machine's password being
+ * sent to another: a prompt raised by session A, left on screen while the user
+ * switches to machine B, must not be answered into B. Tokens are required to be
+ * real numbers so two token-less objects cannot compare equal.
+ */
+export function promptOwner(session, prompt) {
+  if (!session || !prompt || typeof session.token !== 'number' || session.token !== prompt.token) {
+    return null
+  }
+
+  return session
+}
+
+/** Drop the prompt if it belongs to `token` — otherwise leave it alone. */
+function clearPromptFor(token) {
+  if ($prompt.get()?.token === token) {
+    $prompt.set(null)
+  }
+}
 const $fullscreen = atom(false)
 
 const STORAGE_KEYS = { machines: 'machines', lastUsed: 'last-used' }
@@ -671,8 +697,13 @@ function setStatus(patch) {
  * `onclose`/`onopen` as properties, so our `addEventListener` listeners coexist
  * with noVNC's.
  */
-class VncSession {
+/** Distinguishes one session from the next, so a credentials prompt raised by
+ *  a session can never be answered into a different one. */
+let sessionSeq = 0
+
+export class VncSession {
   constructor(machine, container) {
+    this.token = ++sessionSeq
     this.machine = machine
     this.container = container
     this.rfb = null
@@ -784,6 +815,9 @@ class VncSession {
     }
 
     on('connect', () => {
+      // Connected without needing them after all (a retry that did not
+      // re-challenge); a prompt still on screen would sit over a live desktop.
+      clearPromptFor(this.token)
       this.everConnected = true
       this.connectedAt = Date.now()
       setStatus({ phase: 'connected', message: 'Connected', detail: '', attempt: 0, nextRetryAt: 0 })
@@ -798,7 +832,7 @@ class VncSession {
     })
 
     on('credentialsrequired', event => {
-      $prompt.set({ kind: 'vnc', types: event.detail?.types ?? ['password'] })
+      $prompt.set({ types: event.detail?.types ?? ['password'], token: this.token })
       setStatus({ phase: 'connecting', message: 'Waiting for credentials…', detail: '' })
     })
 
@@ -815,8 +849,20 @@ class VncSession {
     })
   }
 
-  /** Push the machine's display preferences onto the live RFB object. */
-  applyDisplaySettings() {
+  /**
+   * Push the machine's display preferences onto the live RFB object.
+   *
+   * Takes the machine so an edit reaches the session: `this.machine` is the
+   * object captured when the session was constructed, and editing a machine
+   * replaces it with a new object. Re-applying the captured one silently undid
+   * every toggle — worst of all View only, where the toolbar would say
+   * "View only" while input still reached the remote machine.
+   */
+  applyDisplaySettings(machine = this.machine) {
+    // Transport fields are handled by reconnecting, so adopting the edited
+    // machine here only ever refreshes display preferences.
+    this.machine = machine
+
     if (!this.rfb) {
       return
     }
@@ -929,6 +975,10 @@ class VncSession {
   }
 
   teardownSocket() {
+    // The prompt cannot outlive the attempt that raised it: answering it later
+    // would hand this machine's password to whichever session is current.
+    clearPromptFor(this.token)
+
     this.disposers.forEach(dispose => {
       try {
         dispose()
@@ -1000,6 +1050,7 @@ function disconnectCurrent() {
   session?.dispose()
   session = null
   $status.set({ phase: 'idle' })
+  $fullscreen.set(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1210,10 +1261,13 @@ function ViewerPane() {
     // display-only edits are pushed live by the effect below.
   }, [machine?.id, machine?.host, machine?.port, machine?.path, machine?.secure, machine?.shared])
 
-  // Display preferences apply to the live connection without a reconnect.
+  // Display preferences apply to the live connection without a reconnect. The
+  // id guard stops an edit landing on a session for a different machine.
   useEffect(() => {
-    session?.applyDisplaySettings()
-  }, [machine?.viewOnly, machine?.scale, machine?.quality, machine?.compression])
+    if (machine && session?.machine?.id === machine.id) {
+      session.applyDisplaySettings(machine)
+    }
+  }, [machine, machine?.viewOnly, machine?.scale, machine?.quality, machine?.compression])
 
   /**
    * Keyboard passthrough.
@@ -1485,13 +1539,17 @@ function ViewerOverlay({ status }) {
 /** Add/edit a machine. */
 function MachineEditor() {
   const editing = useValue($editing)
-  const [draft, setDraft] = useState(null)
+  const [edited, setEdited] = useState(null)
 
-  useEffect(() => setDraft(editing), [editing])
-
-  if (!editing || !draft) {
+  if (!editing) {
     return null
   }
+
+  // Derived, not synced through an effect: an effect leaves one render where
+  // `edited` still holds the previously-open machine, so opening the editor on
+  // a second machine could paint the first one's in-progress fields.
+  const draft = edited && edited.id === editing.id ? edited : editing
+  const setDraft = setEdited
 
   const result = normalizeMachine(draft, { id: draft.id })
   const known = $machines.get().some(m => m.id === draft.id)
@@ -1624,10 +1682,20 @@ function CredentialsDialog() {
     return null
   }
 
+  // The session that asked may have been disposed or replaced while the dialog
+  // was open (a machine switch, a disconnect). Never answer into another one.
+  const owner = promptOwner(session, prompt)
+
+  if (!owner) {
+    $prompt.set(null)
+
+    return null
+  }
+
   const needsUsername = Boolean(prompt.types?.includes('username'))
 
   const submit = () => {
-    session?.sendCredentials(needsUsername ? { username, password } : { password })
+    owner.sendCredentials(needsUsername ? { username, password } : { password })
     $prompt.set(null)
   }
 
@@ -1714,6 +1782,12 @@ function selectMachine(id) {
     return
   }
 
+  // Reset synchronously, at click time. The session's own reset happens in an
+  // effect, which runs after paint — long enough to show the previous
+  // machine's desktop name and connected state over the new one.
+  $status.set({ phase: 'connecting', message: 'Connecting…', detail: '' })
+  // Fullscreen is a property of looking at one machine, not of the pane.
+  $fullscreen.set(false)
   $selectedId.set(id)
 
   try {
