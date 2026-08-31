@@ -1,0 +1,244 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Hermes noVNC — connection verification</title>
+    <style>
+      body { font: 13px/1.5 ui-monospace, monospace; background: #14161a; color: #d8dde5; margin: 16px; }
+      #results div { padding: 2px 0; }
+      .pass::before { content: 'PASS  '; color: #4ade80; }
+      .fail::before { content: 'FAIL  '; color: #f87171; }
+      .info::before { content: '      '; }
+      .fail { color: #f87171; }
+      #screen { margin-top: 12px; width: 640px; height: 400px; border: 1px solid #333; }
+      h1 { font-size: 14px; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <h1>Hermes noVNC — connection verification</h1>
+    <div id="results"></div>
+    <div id="screen"></div>
+
+    <script type="module">
+      // This page deliberately mirrors plugin.js's loadRfbClass() algorithm.
+      // The only difference is how module source is read: fetch() here, the
+      // desktop file bridge in the plugin. Everything else — the specifier
+      // rewriting, the post-order blob construction, the dynamic import of the
+      // entry — is the same code path, so if it works here it works there.
+
+      const results = document.getElementById('screen') && document.getElementById('results')
+      const log = (state, text) => {
+        const line = document.createElement('div')
+        line.className = state
+        line.textContent = text
+        results.appendChild(line)
+        console.log(`[${state}] ${text}`)
+      }
+      const check = (condition, text) => {
+        log(condition ? 'pass' : 'fail', text)
+
+        return condition
+      }
+
+      const IMPORT_SPECIFIER = () => /(from\s*|import\s*\(\s*|import\s+)(['"])([^'"]+)\2/g
+
+      function resolveRelative(fromPath, spec) {
+        const segments = fromPath.split('/').slice(0, -1).concat(spec.split('/'))
+        const out = []
+
+        for (const segment of segments) {
+          if (!segment || segment === '.') continue
+          if (segment === '..') { out.pop(); continue }
+          out.push(segment)
+        }
+
+        return out.join('/')
+      }
+
+      async function loadRfbClass() {
+        const built = new Map()
+        const created = []
+        let reads = 0
+
+        async function build(relPath) {
+          if (built.has(relPath)) return built.get(relPath)
+
+          const response = await fetch(`/${relPath}`)
+          if (!response.ok) throw new Error(`${relPath}: HTTP ${response.status}`)
+          const text = await response.text()
+          reads += 1
+
+          const mapping = new Map()
+
+          for (const match of text.matchAll(IMPORT_SPECIFIER())) {
+            const spec = match[3]
+            if (!spec.startsWith('.') || mapping.has(spec)) continue
+            mapping.set(spec, await build(resolveRelative(relPath, spec)))
+          }
+
+          const rewritten = text.replace(IMPORT_SPECIFIER(), (whole, pre, quote, spec) =>
+            mapping.has(spec) ? `${pre}${quote}${mapping.get(spec)}${quote}` : whole
+          )
+
+          const url = URL.createObjectURL(new Blob([rewritten], { type: 'text/javascript' }))
+          built.set(relPath, url)
+          created.push(url)
+
+          return url
+        }
+
+        const entry = await build('vendor/novnc/core/rfb.js')
+        const module = await import(entry)
+        created.forEach(url => URL.revokeObjectURL(url))
+
+        return { RFB: module.default, reads }
+      }
+
+      async function run() {
+        let RFB
+        const started = performance.now()
+
+        try {
+          const loaded = await loadRfbClass()
+          RFB = loaded.RFB
+          check(typeof RFB === 'function', `noVNC loaded from ${loaded.reads} vendored modules via blob URLs in ${Math.round(performance.now() - started)}ms`)
+        } catch (error) {
+          check(false, `module graph failed to load: ${error.message}`)
+
+          return
+        }
+
+        // --- real connection against the harness ---------------------------
+        const params = new URLSearchParams(location.search)
+        const port = params.get('port') ?? '6080'
+        const scenario = params.get('scenario') ?? 'ok'
+        const url = `ws://127.0.0.1:${port}/`
+        log('info', `scenario "${scenario}" against ${url}`)
+
+        const socket = new WebSocket(url)
+        let close = null
+
+        socket.addEventListener('close', event => {
+          close = { code: event.code, reason: event.reason, wasClean: event.wasClean }
+        })
+
+        const rfb = new RFB(document.getElementById('screen'), socket, { shared: true })
+        rfb.viewOnly = false
+        rfb.scaleViewport = true
+
+        // Registered synchronously after construction, exactly as plugin.js
+        // does — desktopname and securityfailure both fire before `connect`,
+        // so a listener added after awaiting connect would miss them.
+        let desktopName = null
+        let securityFailure = null
+        rfb.addEventListener('desktopname', e => { desktopName = e.detail?.name ?? null })
+        rfb.addEventListener('securityfailure', e => { securityFailure = { ...e.detail } })
+
+        const event = (name, ms) =>
+          new Promise(resolve => {
+            const timer = setTimeout(() => resolve(null), ms)
+            rfb.addEventListener(name, e => { clearTimeout(timer); resolve(e) }, { once: true })
+          })
+
+        const connected = await event('connect', 8000)
+
+        if (scenario !== 'ok') {
+          await new Promise(resolve => setTimeout(resolve, scenario === 'drop' ? 2500 : 800))
+          check(!connected || scenario === 'drop', `connect ${connected ? 'succeeded' : 'did not happen'}, as expected for "${scenario}"`)
+          log('info', `close = ${JSON.stringify(close)}`)
+          log('info', `securityfailure = ${JSON.stringify(securityFailure)}`)
+
+          if (scenario === 'fail-auth') {
+            check(securityFailure !== null, `securityfailure fired with status=${securityFailure?.status} reason=${JSON.stringify(securityFailure?.reason)}`)
+          }
+
+          if (scenario === 'drop') {
+            check(close?.code === 1011, `server-initiated close surfaced code ${close?.code} reason=${JSON.stringify(close?.reason)}`)
+          }
+
+          if (scenario === 'refuse') {
+            check(close?.code === 1006, `a refused upgrade surfaces as ${close?.code} with reason ${JSON.stringify(close?.reason)} — the HTTP status is not visible, as documented`)
+          }
+
+          log('info', 'done')
+          document.title = 'verification complete'
+
+          return
+        }
+
+        if (!check(Boolean(connected), 'RFB handshake completed against the harness')) {
+          log('info', `close was ${JSON.stringify(close)}`)
+
+          return
+        }
+
+        check(Boolean(desktopName), `desktop name received: ${desktopName ?? '(none)'}`)
+
+        // Give the server a couple of framebuffer updates, then read pixels
+        // straight off noVNC's canvas to prove decoding actually happened.
+        await new Promise(resolve => setTimeout(resolve, 900))
+
+        const canvas = document.querySelector('#screen canvas')
+
+        if (check(Boolean(canvas), 'noVNC created its canvas inside the container')) {
+          check(canvas.width > 0 && canvas.height > 0, `canvas is ${canvas.width}x${canvas.height}`)
+
+          const ctx = canvas.getContext('2d')
+          const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+          const distinct = new Set()
+
+          for (let i = 0; i < data.length; i += 4 * 997) {
+            distinct.add(`${data[i]},${data[i + 1]},${data[i + 2]}`)
+          }
+
+          check(distinct.size > 1, `framebuffer decoded — ${distinct.size} distinct sampled colours (a blank canvas would be 1)`)
+        }
+
+        // Input: move the pointer and click. The harness logs what it receives,
+        // and it paints a marker at the cursor, so this is observable both ways.
+        // noVNC binds mousedown/mouseup/mousemove, not pointer events.
+        const rect = canvas.getBoundingClientRect()
+        const at = (dx, dy, type, extra = {}) =>
+          canvas.dispatchEvent(new MouseEvent(type, {
+            clientX: Math.round(rect.left + rect.width * dx),
+            clientY: Math.round(rect.top + rect.height * dy),
+            bubbles: true, view: window, ...extra
+          }))
+
+        for (const [dx, dy] of [[0.25, 0.3], [0.7, 0.65]]) {
+          at(dx, dy, 'mousemove')
+          await new Promise(resolve => setTimeout(resolve, 150))
+        }
+
+        at(0.5, 0.5, 'mousedown', { button: 0, buttons: 1 })
+        await new Promise(resolve => setTimeout(resolve, 80))
+        at(0.5, 0.5, 'mouseup', { button: 0, buttons: 0 })
+        await new Promise(resolve => setTimeout(resolve, 200))
+        log('info', 'dispatched two mouse moves and a click — check the harness log for PointerEvent lines')
+
+        // Clipboard: server-bound cut text.
+        rfb.clipboardPasteFrom('hermes-novnc verification')
+        log('info', 'sent clipboard text — check the harness log for ClientCutText')
+
+        await new Promise(resolve => setTimeout(resolve, 300))
+
+        // --- close code capture --------------------------------------------
+        rfb.disconnect()
+        await new Promise(resolve => setTimeout(resolve, 400))
+
+        check(close !== null, `close event captured: code=${close?.code} reason=${JSON.stringify(close?.reason ?? '')}`)
+        check(
+          typeof close?.code === 'number',
+          'the real WebSocket close code is observable — this is what the plugin surfaces instead of a generic "disconnected"'
+        )
+
+        log('info', 'done')
+        document.title = 'verification complete'
+      }
+
+      run().catch(error => {
+        log('fail', `unexpected: ${error.stack ?? error.message}`)
+      })
+    </script>
+  </body>
+</html>

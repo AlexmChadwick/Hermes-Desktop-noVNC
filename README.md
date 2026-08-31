@@ -121,6 +121,47 @@ No dependencies — the suite runs on Node's built-in test runner, and `test/loa
 
 Covered: machine config parsing and validation, endpoint pasting, WebSocket URL construction, the backoff schedule and its jitter bounds, close-code diagnosis and which failures are worth retrying, and the vendored module graph. The rendering path is not faked — it needs a real browser and a real server, so it is verified by hand instead.
 
+## What was actually verified
+
+The unit tests cover the logic; the parts that need a real browser and a real
+server were verified by hand against `test/harness/`, a dependency-free RFB 3.8
+server that speaks WebSocket directly. Run it yourself:
+
+```bash
+node test/harness/rfb-server.mjs --port 6080
+```
+
+```bash
+node test/harness/verify-server.mjs
+```
+
+Then open `http://127.0.0.1:6099/` (connection path) and
+`http://127.0.0.1:6099/test/harness/verify-plugin.html` (plugin load path).
+
+Observed in Chromium:
+
+| Step | Result |
+| --- | --- |
+| Vendored module graph | noVNC's 52 modules built into blob URLs and imported in ~100–230 ms |
+| RFB handshake | Completed against the harness; desktop name `Hermes noVNC harness` received |
+| Framebuffer | Canvas created at 640×400, Raw updates decoded and rendered |
+| Mouse input | `PointerEvent x=160 y=119`, `x=448 y=259`, and a click (`buttons=1` → `0`) arrived server-side with correct coordinates |
+| Clipboard → remote | `ClientCutText "hermes-novnc verification"` received |
+| Server-initiated close | Surfaced as **code 1011, reason "harness forced drop"**, through noVNC — the close code really is recoverable |
+| Bad VNC credentials | `securityfailure` fired with `status=1` and the server's reason string, distinct from the transport close |
+| Refused upgrade (HTTP 404) | Surfaced as **1006 with an empty reason** — confirming that the handshake's HTTP status is genuinely invisible, exactly as documented above |
+| Plugin load | `plugin.js` evaluated in a browser and registered 2 panes (`left`, `main`), 2 palette entries, and an `onDispose` cleanup; both `render()` calls returned elements |
+
+One finding worth recording: a server that floods uncompressed Raw updates can
+bury its own close frame, and the close then degrades to `1006`. That was the
+harness being naive rather than anything in the plugin — real servers negotiate
+Tight or ZRLE — but it is why `test/harness/rfb-server.mjs` applies write
+backpressure.
+
+**Not** verified by me: the panes rendering inside Hermes Desktop itself, and a
+connection to a real VNC server over websockify. The plugin is installed and
+ready for that.
+
 ## Out of scope for v1
 
 H.264 and any transcoding path, RDP, audio, and file transfer.

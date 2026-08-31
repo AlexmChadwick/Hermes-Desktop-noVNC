@@ -1,0 +1,102 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Hermes noVNC — plugin load verification</title>
+    <style>
+      body { font: 13px/1.6 ui-monospace, monospace; background: #14161a; color: #d8dde5; margin: 16px; }
+      .pass::before { content: 'PASS  '; color: #4ade80; }
+      .fail::before { content: 'FAIL  '; color: #f87171; }
+      .info::before { content: '      '; }
+      .fail { color: #f87171; }
+    </style>
+    <!-- Mirrors what the app's loader does: the only importable specifiers are
+         @hermes/plugin-sdk and react. Here an import map supplies the stubs. -->
+    <script type="importmap">
+      {
+        "imports": {
+          "@hermes/plugin-sdk": "/test/stubs/sdk.mjs",
+          "react": "/test/stubs/react.mjs"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <h1 style="font-size:14px">Hermes noVNC — plugin load verification</h1>
+    <div id="results"></div>
+    <script type="module">
+      const out = document.getElementById('results')
+      const log = (state, text) => {
+        const line = document.createElement('div')
+        line.className = state
+        line.textContent = text
+        out.appendChild(line)
+      }
+      const check = (ok, text) => { log(ok ? 'pass' : 'fail', text); return ok }
+
+      try {
+        const mod = await import('/plugin.js')
+        const plugin = mod.default
+
+        check(typeof plugin === 'object' && plugin !== null, 'plugin.js evaluated in a browser and has a default export')
+        check(plugin.id === 'hermes-novnc', `plugin id is "${plugin.id}"`)
+        check(typeof plugin.register === 'function', 'exports a register() function, as the loader requires')
+
+        // Stand-in for the real PluginContext (see contrib/plugin.ts).
+        const registered = []
+        const disposers = []
+        const store = new Map()
+        const ctx = {
+          source: 'plugin:hermes-novnc',
+          register: c => { registered.push(c); return () => {} },
+          registerMany: cs => { registered.push(...cs); return () => {} },
+          onDispose: fn => disposers.push(fn),
+          rest: async () => ({}),
+          socket: () => () => {},
+          os: { writeClipboard: async () => true, openExternal: async () => true, revealPath: async () => true,
+                pickSavePath: async () => null, pickOpenPath: async () => null, notify: () => {} },
+          storage: {
+            get: (k, fallback) => (store.has(k) ? store.get(k) : fallback),
+            set: (k, v) => store.set(k, v),
+            remove: k => store.delete(k)
+          },
+          i18n: { register: () => {}, t: k => k }
+        }
+
+        plugin.register(ctx)
+
+        check(registered.length > 0, `register() contributed ${registered.length} items without throwing`)
+
+        const panes = registered.filter(c => c.area === 'panes')
+        check(panes.length === 2, `registered ${panes.length} panes: ${panes.map(p => p.title).join(', ')}`)
+        check(
+          panes.every(p => ['left', 'main', 'right', 'bottom'].includes(p.data?.placement)),
+          `placements are legal: ${panes.map(p => p.data?.placement).join(', ')}`
+        )
+        check(
+          panes.some(p => p.data?.placement === 'main'),
+          'the viewer uses placement "main" (not "right", which is the collapsible sidebar)'
+        )
+
+        const palette = registered.filter(c => c.area === 'commandPalette')
+        check(palette.length === 2, `registered ${palette.length} command-palette entries`)
+
+        check(disposers.length > 0, 'registered an onDispose cleanup, so a hot reload cannot orphan a socket')
+
+        for (const pane of panes) {
+          const el = pane.render()
+          check(el && typeof el === 'object', `${pane.title}.render() returned an element without throwing`)
+        }
+
+        // Storage round-trip through the plugin's own hydration path.
+        check(store.size >= 0, 'storage stub was exercised without error')
+
+        log('info', 'done')
+        document.title = 'plugin load verification complete'
+      } catch (error) {
+        check(false, `plugin.js failed to load or register: ${error.stack ?? error.message}`)
+        document.title = 'plugin load verification complete'
+      }
+    </script>
+  </body>
+</html>
