@@ -9,7 +9,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, it } from 'node:test'
 
-import { NOVNC_VERSION, resolveRelative } from '../plugin.js'
+import { NOVNC_VERSION, readModuleSource, resolveRelative } from '../plugin.js'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const ENTRY = 'vendor/novnc/core/rfb.js'
@@ -191,5 +191,34 @@ describe('resolveRelative', () => {
   it('collapses redundant segments', () => {
     assert.equal(resolveRelative('a/b/c.js', './././d.js'), 'a/b/d.js')
     assert.equal(resolveRelative('a/b/c.js', '../b/./d.js'), 'a/b/d.js')
+  })
+})
+
+describe('readModuleSource', () => {
+  // The two bridges differ in a way that matters: readPluginSource reads up to
+  // 16 MiB and rejects rather than truncating; readFileText is the preview
+  // bridge and silently truncates at 512 KiB. Evaluating half a module is the
+  // worst outcome, because half a module can still parse.
+  it('prefers the plugin-source bridge when the shell has it', async () => {
+    const calls = []
+    const desktop = {
+      readPluginSource: async p => (calls.push(['plugin', p]), { text: 'SOURCE' }),
+      readFileText: async p => (calls.push(['preview', p]), { text: 'WRONG', truncated: false })
+    }
+
+    assert.equal(await readModuleSource(desktop, '/abs/x.js', 'x.js'), 'SOURCE')
+    assert.deepEqual(calls, [['plugin', '/abs/x.js']])
+  })
+
+  it('falls back to the preview bridge on an older shell', async () => {
+    const desktop = { readFileText: async () => ({ text: 'SOURCE', truncated: false }) }
+
+    assert.equal(await readModuleSource(desktop, '/abs/x.js', 'x.js'), 'SOURCE')
+  })
+
+  it('refuses a truncated read rather than evaluating a fragment', async () => {
+    const desktop = { readFileText: async () => ({ text: 'half a mod', truncated: true }) }
+
+    await assert.rejects(() => readModuleSource(desktop, '/abs/big.js', 'big.js'), /512 KiB|read limit/)
   })
 })

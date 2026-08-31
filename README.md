@@ -87,7 +87,7 @@ Hermes dispatches its shortcuts from a capture-phase listener on `window`, which
 - **HiDPI**: noVNC does no `devicePixelRatio` handling, so a scaled-down remote framebuffer looks soft on a Retina display. The fix is server-side — run the remote desktop at a higher resolution.
 - **Hidden panes**: the app mounts boot-hidden panes behind `display:none`, which collapses the container to 0×0 and would give noVNC a degenerate viewport. The plugin waits for real dimensions before connecting.
 - **One connection at a time**, by design. noVNC does not throttle itself when hidden, so keeping several sessions live in the background would cost real CPU for pixels nobody is looking at.
-- **CSP**: if the app's policy blocks the endpoint, that surfaces as a plain `1006` — the plugin listens for `securitypolicyviolation` so it can say "blocked by Content-Security-Policy" instead.
+- **CSP**: the desktop app sets no Content-Security-Policy on its main window today, so nothing blocks `connect-src`. The plugin still listens for `securitypolicyviolation` as defence in depth, because if one is ever added a block would otherwise be indistinguishable from a `1006`.
 
 ## How to audit this file
 
@@ -186,6 +186,7 @@ Observed in Chromium:
 | Refused upgrade (HTTP 404) | Surfaced as **1006 with an empty reason** — confirming that the handshake's HTTP status is genuinely invisible, exactly as documented above |
 | Plugin load | `plugin.js` evaluated in a browser and registered 2 panes (`left`, `main`), 2 palette entries, and an `onDispose` cleanup; both `render()` calls returned elements |
 | Host loader acceptance | The loader's own text scan run verbatim over `plugin.js` — see [the gotcha](#a-loader-gotcha-worth-knowing), which is how the first install failed |
+| SDK/UI contracts | Every SDK import, component prop, CSS custom property and Codicon name checked against the installed app source; the CSS and icon checks run against it on every test run |
 | Reachability probe | A live host resolves opaque (`type=opaque status=0`); a dead port throws `TypeError: Failed to fetch` — so the two really are distinguishable |
 
 Three bugs were caught by testing rather than by reading the code — the third

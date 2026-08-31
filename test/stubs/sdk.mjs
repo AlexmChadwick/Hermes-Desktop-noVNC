@@ -42,7 +42,9 @@ export const host = {
   state: {}
 }
 
-export const PALETTE_AREA = 'commandPalette'
+// Real value, verified against app/command-palette/contrib.ts — an earlier
+// stub said 'commandPalette', which made a browser assertion pass vacuously.
+export const PALETTE_AREA = 'palette'
 export const PANES_AREA = 'panes'
 
 export const Button = component('Button')

@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { BACKOFF, backoffDelay, describeClose, describeSecurityFailure } from '../plugin.js'
+import { BACKOFF, backoffDelay, describeClose, describeSecurityFailure, errorStatus } from '../plugin.js'
 
 describe('backoffDelay', () => {
   it('is deterministic when random is injected', () => {
@@ -156,5 +156,48 @@ describe('describeSecurityFailure', () => {
 
   it('falls back to the status when the server sends no reason', () => {
     assert.match(describeSecurityFailure({ status: 2 }).detail, /status 2/)
+  })
+})
+
+describe('errorStatus', () => {
+  // The close code is the headline feature; it has to reach the UI, not just
+  // the prose. Every error path was building its status by hand and dropping
+  // `code`, so the overlay's "Close code N" line could never render.
+  it('carries the close code through to the UI status', () => {
+    const status = errorStatus(describeClose({ code: 1015 }))
+
+    assert.equal(status.phase, 'error')
+    assert.equal(status.code, 1015)
+    assert.ok(status.message.length > 0)
+    assert.ok(status.detail.length > 0)
+  })
+
+  it('carries a refused-upgrade 1006 through', () => {
+    assert.equal(errorStatus(describeClose({ code: 1006, reachable: true })).code, 1006)
+  })
+
+  it('carries the RFB security status through', () => {
+    const status = errorStatus(describeSecurityFailure({ status: 1, reason: 'nope' }))
+
+    assert.equal(status.code, 1)
+    assert.match(status.detail, /nope/)
+  })
+
+  it('uses null rather than undefined when there is no code', () => {
+    // The overlay tests `code !== undefined && code !== null`; undefined from a
+    // missing property and null from here must both suppress the line, but a
+    // stable shape keeps the merge/replace semantics predictable.
+    const status = errorStatus({ title: 't', detail: 'd' })
+
+    assert.equal(status.code, null)
+  })
+
+  it('preserves an overridden title and detail', () => {
+    const described = describeClose({ code: 1006, everConnected: true })
+    const status = errorStatus({ ...described, title: 'Gave up reconnecting', detail: 'x' })
+
+    assert.equal(status.message, 'Gave up reconnecting')
+    assert.equal(status.detail, 'x')
+    assert.equal(status.code, 1006)
   })
 })

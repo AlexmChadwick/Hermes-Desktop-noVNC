@@ -393,6 +393,22 @@ export function describeClose({ code, reason, everConnected = false, reachable =
   }
 }
 
+/**
+ * The status object an error should produce.
+ *
+ * Exported so a test can hold it to its contract: the close code has to reach
+ * the UI, not just the prose diagnosis. The overlay renders "Close code N" from
+ * `code`, and every error path must therefore carry it.
+ */
+export function errorStatus(described) {
+  return {
+    phase: 'error',
+    message: described.title,
+    detail: described.detail,
+    code: described.code ?? null
+  }
+}
+
 /** RFB SecurityResult failure — a VNC-level rejection, not a transport one.
  *  Never retryable: retrying a wrong password just locks people out faster. */
 export function describeSecurityFailure({ status, reason } = {}) {
@@ -443,6 +459,32 @@ export function resolveRelative(fromPath, spec) {
   }
 
   return out.join('/')
+}
+
+/**
+ * Read one vendored module in full.
+ *
+ * Prefers the dedicated plugin-source bridge, which reads up to 16 MiB and
+ * rejects rather than truncating. `readFileText` is the preview bridge and
+ * silently truncates at 512 KiB — every vendored file is far smaller than that
+ * today, but half a module still parses, so a future noVNC bump must fail
+ * loudly instead of evaluating a fragment. Older shells only have the preview
+ * bridge, hence the fallback.
+ */
+export async function readModuleSource(desktop, absolutePath, relPath) {
+  if (desktop.readPluginSource) {
+    return (await desktop.readPluginSource(absolutePath)).text
+  }
+
+  const { text, truncated } = await desktop.readFileText(absolutePath)
+
+  if (truncated) {
+    throw new Error(
+      `${relPath} exceeds this shell's 512 KiB read limit. Update Hermes Desktop, which reads plugin sources in full.`
+    )
+  }
+
+  return text
 }
 
 /** Memoized across the plugin's lifetime: noVNC is loaded once per app session
@@ -517,11 +559,7 @@ async function loadRfbClass() {
 
       building.add(relPath)
 
-      const { text, truncated } = await desktop.readFileText(`${dir}/${relPath}`)
-
-      if (truncated) {
-        throw new Error(`${relPath} was truncated while reading; cannot safely evaluate a partial module.`)
-      }
+      const text = await readModuleSource(desktop, `${dir}/${relPath}`, relPath)
 
       // Resolve every distinct relative specifier to its dependency's blob URL.
       const mapping = new Map()
@@ -533,7 +571,17 @@ async function loadRfbClass() {
           continue
         }
 
-        mapping.set(spec, await build(resolveRelative(relPath, spec)))
+        const target = resolveRelative(relPath, spec)
+
+        try {
+          mapping.set(spec, await build(target))
+        } catch (error) {
+          // The specifier regex is not comment-aware, so prose in an upstream
+          // file could resolve to a path that does not exist. test/vendor-graph
+          // catches that before shipping; if one ever reaches here, say exactly
+          // which file and specifier rather than surfacing a bare read error.
+          throw new Error(`${relPath} imports "${spec}" (${target}), which could not be read: ${error?.message ?? error}`)
+        }
       }
 
       const rewritten = text.replace(IMPORT_SPECIFIER(), (whole, pre, quote, spec) =>
@@ -647,11 +695,14 @@ class VncSession {
     }
 
     this.teardownSocket()
-    setStatus({
+    // Replace rather than merge: a merge would carry the previous machine's
+    // desktop name and close code into this connection's status, so switching
+    // machines showed the old desktop's name while the new one was connecting.
+    $status.set({
       phase: 'connecting',
       message: this.attempt > 0 ? `Reconnecting (attempt ${this.attempt + 1})…` : 'Connecting…',
       detail: '',
-      nextRetryAt: 0
+      attempt: this.attempt
     })
 
     let RFB
@@ -672,10 +723,12 @@ class VncSession {
     this.lastClose = null
     this.cspBlocked = null
 
-    // A Content-Security-Policy block on connect-src reaches JavaScript as an
-    // ordinary 1006 with no reason, indistinguishable from the host being down.
-    // The violation event is the only way to tell them apart, so listen for it
-    // across the attempt and let handleDisconnect prefer it.
+    // Defence in depth. The desktop app sets no Content-Security-Policy on its
+    // main window today (checked: no meta tag, no onHeadersReceived), so this
+    // never fires as things stand. If one is ever added, a connect-src block
+    // reaches JavaScript as an ordinary 1006 with no reason — indistinguishable
+    // from the host being down — and this event is the only way to tell them
+    // apart, so handleDisconnect prefers it when present.
     const onViolation = event => {
       if (
         String(event.effectiveDirective ?? event.violatedDirective ?? '').includes('connect-src') &&
@@ -741,8 +794,7 @@ class VncSession {
     on('securityfailure', event => {
       // Terminal by construction — stop before handleDisconnect can retry.
       this.stopped = true
-      const described = describeSecurityFailure(event.detail ?? {})
-      setStatus({ phase: 'error', message: described.title, detail: described.detail })
+      $status.set(errorStatus(describeSecurityFailure(event.detail ?? {})))
     })
 
     on('credentialsrequired', event => {
@@ -783,9 +835,12 @@ class VncSession {
   }
 
   handleDisconnect() {
+    // Reaching here while stopped means something terminal already ran and set
+    // the status — a security failure sets `stopped` and then the socket closes.
+    // Resetting to idle here wiped that message, so a wrong VNC password read
+    // as "Not connected". A user-initiated stop cannot reach this at all:
+    // dispose() removes these listeners before it disconnects.
     if (this.stopped) {
-      setStatus({ phase: 'idle', message: '', detail: '' })
-
       return
     }
 
@@ -812,7 +867,7 @@ class VncSession {
           })
 
       if (!described.retryable) {
-        setStatus({ phase: 'error', message: described.title, detail: described.detail })
+        $status.set(errorStatus(described))
 
         return
       }
@@ -824,11 +879,13 @@ class VncSession {
       }
 
       if (this.attempt >= BACKOFF.maxAttempts) {
-        setStatus({
-          phase: 'error',
-          message: 'Gave up reconnecting',
-          detail: `${described.detail} Stopped after ${BACKOFF.maxAttempts} attempts.`
-        })
+        $status.set(
+          errorStatus({
+            ...described,
+            title: 'Gave up reconnecting',
+            detail: `${described.detail} Stopped after ${BACKOFF.maxAttempts} attempts.`
+          })
+        )
 
         return
       }
@@ -999,7 +1056,7 @@ function MachinesPane() {
       h('span', { className: 'text-[0.7rem] font-medium text-(--ui-text-secondary)' }, 'Machines'),
       h(
         Tip,
-        { content: 'Add a machine' },
+        { label: 'Add a machine' },
         h(
           Button,
           {
@@ -1228,7 +1285,7 @@ function ViewerPane() {
     {
       className: cn(
         'flex h-full min-h-0 flex-col',
-        fullscreen && 'fixed inset-0 z-50 bg-(--ui-bg)'
+        fullscreen && 'fixed inset-0 z-50 bg-(--ui-bg-editor)'
       )
     },
     h(ViewerToolbar, { machine, status, passthrough, setPassthrough, fullscreen }),
@@ -1261,7 +1318,7 @@ function ViewerToolbar({ machine, status, passthrough, setPassthrough, fullscree
 
     h(
       Tip,
-      { content: machine.viewOnly ? 'View only — click to take control' : 'You have control — click for view only' },
+      { label: machine.viewOnly ? 'View only — click to take control' : 'You have control — click for view only' },
       h(
         Button,
         {
@@ -1278,7 +1335,7 @@ function ViewerToolbar({ machine, status, passthrough, setPassthrough, fullscree
 
     h(
       Tip,
-      { content: machine.scale === 'fit' ? 'Scaled to fit — click for 1:1' : '1:1 — click to scale to fit' },
+      { label: machine.scale === 'fit' ? 'Scaled to fit — click for 1:1' : '1:1 — click to scale to fit' },
       h(
         Button,
         {
@@ -1296,7 +1353,7 @@ function ViewerToolbar({ machine, status, passthrough, setPassthrough, fullscree
     h(
       Tip,
       {
-        content: passthrough
+        label: passthrough
           ? 'Keys go to the remote machine (Cmd/Ctrl shortcuts still reach Hermes)'
           : 'Keys are handled by Hermes'
       },
@@ -1310,7 +1367,7 @@ function ViewerToolbar({ machine, status, passthrough, setPassthrough, fullscree
 
     h(
       Tip,
-      { content: 'Send Ctrl+Alt+Del' },
+      { label: 'Send Ctrl+Alt+Del' },
       h(
         Button,
         {
@@ -1327,7 +1384,7 @@ function ViewerToolbar({ machine, status, passthrough, setPassthrough, fullscree
 
     h(
       Tip,
-      { content: fullscreen ? 'Exit fullscreen' : 'Fullscreen' },
+      { label: fullscreen ? 'Exit fullscreen' : 'Fullscreen' },
       h(
         Button,
         {
@@ -1343,7 +1400,7 @@ function ViewerToolbar({ machine, status, passthrough, setPassthrough, fullscree
 
     h(
       Tip,
-      { content: 'Disconnect' },
+      { label: 'Disconnect' },
       h(
         Button,
         {
@@ -1379,7 +1436,7 @@ function ViewerOverlay({ status }) {
 
   return h(
     'div',
-    { className: 'absolute inset-0 flex flex-col items-center justify-center gap-2 bg-(--ui-bg)/85 p-6 text-center' },
+    { className: 'absolute inset-0 flex flex-col items-center justify-center gap-2 bg-(--ui-bg-editor)/85 p-6 text-center' },
     status.phase === 'connecting'
       ? h(GlyphSpinner, { spinner: 'breathe', className: 'text-(--ui-text-tertiary)' })
       : h(Codicon, {

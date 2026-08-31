@@ -78,7 +78,7 @@
           'the viewer uses placement "main" (not "right", which is the collapsible sidebar)'
         )
 
-        const palette = registered.filter(c => c.area === 'commandPalette')
+        const palette = registered.filter(c => c.area === 'palette')
         check(palette.length === 2, `registered ${palette.length} command-palette entries`)
 
         check(disposers.length > 0, 'registered an onDispose cleanup, so a hot reload cannot orphan a socket')
