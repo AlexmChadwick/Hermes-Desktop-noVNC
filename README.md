@@ -151,8 +151,15 @@ Observed in Chromium:
 | Bad VNC credentials | `securityfailure` fired with `status=1` and the server's reason string, distinct from the transport close |
 | Refused upgrade (HTTP 404) | Surfaced as **1006 with an empty reason** — confirming that the handshake's HTTP status is genuinely invisible, exactly as documented above |
 | Plugin load | `plugin.js` evaluated in a browser and registered 2 panes (`left`, `main`), 2 palette entries, and an `onDispose` cleanup; both `render()` calls returned elements |
+| Reachability probe | A live host resolves opaque (`type=opaque status=0`); a dead port throws `TypeError: Failed to fetch` — so the two really are distinguishable |
 
-One finding worth recording: a server that floods uncompressed Raw updates can
+Two bugs were caught this way rather than by reading the code. Pasting a bare
+`host:port` silently wiped the default websockify path. And the reachability
+probe used `redirect: 'manual'`, which makes Chromium reject the promise even
+when the host answered — every failure would have been reported as "cannot
+reach the host". Both are fixed and covered.
+
+One further finding worth recording: a server that floods uncompressed Raw updates can
 bury its own close frame, and the close then degrades to `1006`. That was the
 harness being naive rather than anything in the plugin — real servers negotiate
 Tight or ZRLE — but it is why `test/harness/rfb-server.mjs` applies write

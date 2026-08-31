@@ -920,7 +920,11 @@ class VncSession {
  */
 async function probeReachable(machine) {
   try {
-    await fetch(buildProbeUrl(machine), { mode: 'no-cors', cache: 'no-store', redirect: 'manual' })
+    // Deliberately NOT `redirect: 'manual'`: combined with `mode: 'no-cors'`
+    // Chromium rejects the promise even when the host answered perfectly well,
+    // which would report every failure as "cannot reach the host". Verified
+    // against a live endpoint — see the verification table in the README.
+    await fetch(buildProbeUrl(machine), { mode: 'no-cors', cache: 'no-store' })
 
     return true
   } catch {
